@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    显式告诉 Visual Studio：两个主 .cs 文件是 WinForms 窗体，
+    Designer.cs 和 resx 分别从属于对应窗体。
+    这些信息放在正式项目文件中，换电脑或删除 .csproj.user 后仍然有效。
+  -->
+  <ItemGroup>
+    <Compile Update="MainForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="MainForm.Designer.cs">
+      <DependentUpon>MainForm.cs</DependentUpon>
+    </Compile>
+    <EmbeddedResource Update="MainForm.resx">
+      <DependentUpon>MainForm.cs</DependentUpon>
+    </EmbeddedResource>
+
+    <Compile Update="ProjectionForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="ProjectionForm.Designer.cs">
+      <DependentUpon>ProjectionForm.cs</DependentUpon>
+    </Compile>
+    <EmbeddedResource Update="ProjectionForm.resx">
+      <DependentUpon>ProjectionForm.cs</DependentUpon>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>
