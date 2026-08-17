@@ -93,6 +93,11 @@ using (var verticalImage = new Bitmap(1, 2))
         "上下翻转没有把图片上下对调");
 }
 
+// 第二屏选择必须忽略主屏；只有主屏时返回 -1，防止误把全屏窗口盖到控制界面。
+Assert(SecondScreenProjectionForm.FindSecondScreenIndex([true, false, false]) == 1 &&
+       SecondScreenProjectionForm.FindSecondScreenIndex([true]) == -1,
+    "第二屏选择规则没有优先使用非主屏或没有正确拒绝单屏环境");
+
 // 第四组：循环报文走到末尾后必须重新从第一条开始。
 var cycle = new CycleMessageSequence();
 cycle.Reset(["&|Stop|@", "&|FF|7500|@"]);
@@ -203,6 +208,8 @@ var designerThread = new Thread(() =>
         var topology = FindControl<ComboBox>(projectionForm, "cmbTopology");
         var imageTransform = FindControl<ComboBox>(projectionForm, "cmbImageTransform");
         var applyImageTransform = FindControl<Button>(projectionForm, "btnApplyImageTransform");
+        var closeSecondScreen = FindControl<CheckBox>(
+            projectionForm, "chkCloseSecondScreenOnStop");
         var projectionInterval = FindControl<NumericUpDown>(
             projectionForm, "numProjectionIntervalSeconds");
         var timedProjection = FindControl<Button>(projectionForm, "btnTimedProjection");
@@ -210,6 +217,8 @@ var designerThread = new Thread(() =>
         Assert(topology.SelectedIndex == 4 && topology.Text == "扩展屏幕" &&
                imageTransform.Items.Count == 5 && imageTransform.SelectedIndex == 0 &&
                imageTransform.Text == "原图" && applyImageTransform.Text == "应用图片效果" &&
+               closeSecondScreen.Checked &&
+               closeSecondScreen.Text == "停止定时投图时关闭第二屏" &&
                projectionInterval.Value == 5 && timedProjection.Text == "开始定时投图" &&
                projectSelected.Text == "投放选中图片",
             "投影窗口缺少扩展屏幕、图片翻转、切图间隔、定时投图或选中图片投放设置");
@@ -221,6 +230,16 @@ var designerThread = new Thread(() =>
         imageTransform.SelectedIndex = 3;
         Assert(imageTransform.Text == "上下翻转（垂直镜像）",
             "投影窗口无法选择上下翻转");
+
+        using var secondScreenForm = new SecondScreenProjectionForm();
+        AssertDesignerFieldsAttached(secondScreenForm);
+        var projectedImage = FindControl<PictureBox>(
+            secondScreenForm, "picProjectedImage");
+        Assert(secondScreenForm.FormBorderStyle == FormBorderStyle.None &&
+               secondScreenForm.TopMost && !secondScreenForm.ShowInTaskbar &&
+               projectedImage.Dock == DockStyle.Fill &&
+               projectedImage.SizeMode == PictureBoxSizeMode.Zoom,
+            "第二屏投图窗口不是无边框置顶全屏图片窗口");
     }
     catch (Exception ex)
     {
@@ -232,7 +251,7 @@ designerThread.Start();
 designerThread.Join();
 if (designerException is not null) throw designerException;
 
-Console.WriteLine("SimpleProtocolServer smoke tests passed: protocol + response confirmation + cycle + TCP + projection UI.");
+Console.WriteLine("SimpleProtocolServer smoke tests passed: protocol + response confirmation + cycle + TCP + second-screen projection UI.");
 
 // 最小断言工具：条件不成立就终止测试并说明原因。
 static void Assert(bool condition, string message)

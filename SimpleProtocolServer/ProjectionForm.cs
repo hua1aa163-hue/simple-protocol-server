@@ -13,7 +13,7 @@ public partial class ProjectionForm : Form
     private static readonly HashSet<string> SupportedExtensions =
         new(StringComparer.OrdinalIgnoreCase) { ".png", ".bmp", ".jpg", ".jpeg" };
 
-    // Windows 壁纸和投影模式的具体调用由服务类负责。
+    // Windows 投影拓扑的具体调用由服务类负责；图片由第二屏窗体显示。
     private readonly IDesktopDisplayService _desktopDisplay = new DesktopDisplayService();
     // 窗体关闭后取消所有等待、延时和批量测试。
     private readonly CancellationTokenSource _formCancellation = new();
@@ -25,8 +25,8 @@ public partial class ProjectionForm : Form
     private CancellationTokenSource? _crosstalkCancellation;
     // 当前实际已经投到桌面的图片下标；-1 表示尚未投过图片。
     private int _currentImageIndex = -1;
-    // 第一次投图前保存原壁纸，按界面选项在停止或关闭时恢复。
-    private string? _originalWallpaper;
+    // 真正铺满第二屏幕的无边框窗口；它与本控制窗口没有 Owner 关系。
+    private SecondScreenProjectionForm? _secondScreenProjectionForm;
     // 状态标志用于避免重复释放，以及统一控制界面按钮是否可用。
     private bool _formCancellationDisposed;
     private bool _isCrosstalkRunning;
@@ -131,9 +131,6 @@ public partial class ProjectionForm : Form
 
         try
         {
-            // 只在第一次投图时保存原壁纸，后续切图不会覆盖这个备份。
-            CaptureOriginalWallpaper();
-
             // 每次投图都重新应用所选拓扑和图片效果，确保第二屏显示符合用户设置。
             DisplayTopology topology = GetSelectedTopology();
             if (topology != DisplayTopology.None)
@@ -141,7 +138,7 @@ public partial class ProjectionForm : Form
                 _desktopDisplay.ApplyTopology(topology);
             }
             ProjectedImageTransform transform = GetSelectedImageTransform();
-            _desktopDisplay.SetWallpaper(imagePath, transform);
+            GetSecondScreenProjectionForm().ShowImage(imagePath, transform);
 
             ShowPreview(imagePath);
             _currentImageIndex = imageIndex;
@@ -173,7 +170,7 @@ public partial class ProjectionForm : Form
     {
         if (_isTimedProjectionRunning)
         {
-            StopTimedProjection("定时投图已停止。", restoreWallpaper: true);
+            StopTimedProjection("定时投图已停止。", closeSecondScreen: true);
             return;
         }
 
@@ -190,7 +187,7 @@ public partial class ProjectionForm : Form
 
         if (!ProjectNextImage(showError: true))
         {
-            StopTimedProjection("定时投图因切图失败而停止。", restoreWallpaper: true);
+            StopTimedProjection("定时投图因切图失败而停止。", closeSecondScreen: true);
             return;
         }
 
@@ -202,17 +199,20 @@ public partial class ProjectionForm : Form
     {
         if (!ProjectNextImage(showError: false))
         {
-            StopTimedProjection("定时投图因切图失败而停止。", restoreWallpaper: true);
+            StopTimedProjection("定时投图因切图失败而停止。", closeSecondScreen: true);
         }
     }
 
-    /// <summary>停止普通定时轮播，并按需要恢复打开窗口前的壁纸。</summary>
-    private void StopTimedProjection(string? logMessage, bool restoreWallpaper)
+    /// <summary>停止普通定时轮播，并按界面选项关闭第二屏全屏窗口。</summary>
+    private void StopTimedProjection(string? logMessage, bool closeSecondScreen)
     {
         projectionTimer.Stop();
         SetTimedProjectionState(false);
         if (!string.IsNullOrEmpty(logMessage)) AppendLog(logMessage);
-        if (restoreWallpaper && chkRestoreWallpaper.Checked) RestoreOriginalWallpaper(showError: false);
+        if (closeSecondScreen && chkCloseSecondScreenOnStop.Checked)
+        {
+            CloseSecondScreenProjection();
+        }
     }
 
     /// <summary>
@@ -231,7 +231,7 @@ public partial class ProjectionForm : Form
         cmbImageTransform.Enabled = settingsEnabled;
         btnApplyImageTransform.Enabled = settingsEnabled;
         numProjectionIntervalSeconds.Enabled = settingsEnabled;
-        chkRestoreWallpaper.Enabled = settingsEnabled;
+        chkCloseSecondScreenOnStop.Enabled = settingsEnabled;
         btnTimedProjection.Enabled = !_isCrosstalkRunning;
         btnRefreshImages.Enabled = !running && !_isCrosstalkRunning;
         btnProjectNext.Enabled = !running && !_isCrosstalkRunning;
@@ -456,35 +456,33 @@ public partial class ProjectionForm : Form
         }
     }
 
-    /// <summary>第一次投图前记录原壁纸路径，供停止或关闭时恢复。</summary>
-    private void CaptureOriginalWallpaper()
+    /// <summary>取得仍可用的第二屏窗口；已经关闭时自动创建一个新实例。</summary>
+    private SecondScreenProjectionForm GetSecondScreenProjectionForm()
     {
-        if (_originalWallpaper is null)
+        if (_secondScreenProjectionForm is null || _secondScreenProjectionForm.IsDisposed)
         {
-            _originalWallpaper = _desktopDisplay.GetCurrentWallpaper();
+            _secondScreenProjectionForm = new SecondScreenProjectionForm();
         }
+
+        return _secondScreenProjectionForm;
     }
 
-    /// <summary>尝试恢复原壁纸；没有备份或文件已不存在时直接返回。</summary>
-    private void RestoreOriginalWallpaper(bool showError)
+    /// <summary>关闭并释放第二屏窗口；可重复调用，不会影响控制窗口。</summary>
+    private void CloseSecondScreenProjection()
     {
-        string? wallpaper = _originalWallpaper;
-        _originalWallpaper = null;
-        if (string.IsNullOrWhiteSpace(wallpaper) || !File.Exists(wallpaper)) return;
+        SecondScreenProjectionForm? projectionForm = _secondScreenProjectionForm;
+        _secondScreenProjectionForm = null;
+        if (projectionForm is null || projectionForm.IsDisposed) return;
 
         try
         {
-            _desktopDisplay.SetWallpaper(wallpaper);
-            AppendLog("已恢复打开投影窗口前的桌面图片。");
+            projectionForm.Close();
+            projectionForm.Dispose();
+            AppendLog("第二屏全屏投图窗口已关闭。");
         }
         catch (Exception ex)
         {
-            AppendLog($"恢复原桌面失败：{ex.Message}");
-            if (showError)
-            {
-                MessageBox.Show(this, ex.Message, "恢复原桌面失败",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            AppendLog($"关闭第二屏投图窗口失败：{ex.Message}");
         }
     }
 
@@ -495,7 +493,7 @@ public partial class ProjectionForm : Form
     /// <summary>关闭投影窗口。</summary>
     private void btnClose_Click(object? sender, EventArgs e) => Close();
 
-    /// <summary>关闭前取消批量任务、停止计时器，并按设置恢复壁纸。</summary>
+    /// <summary>关闭前取消批量任务、停止计时器，并关闭第二屏全屏窗口。</summary>
     private void ProjectionForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
         _crosstalkCancellation?.Cancel();
@@ -503,12 +501,9 @@ public partial class ProjectionForm : Form
 
         if (_isTimedProjectionRunning)
         {
-            StopTimedProjection(null, restoreWallpaper: true);
+            StopTimedProjection(null, closeSecondScreen: false);
         }
-        else if (chkRestoreWallpaper.Checked)
-        {
-            RestoreOriginalWallpaper(showError: false);
-        }
+        CloseSecondScreenProjection();
     }
 
     /// <summary>
@@ -534,7 +529,7 @@ public partial class ProjectionForm : Form
 
         if (_isTimedProjectionRunning)
         {
-            StopTimedProjection("定时投图已停止，开始串扰测试。", restoreWallpaper: false);
+            StopTimedProjection("定时投图已停止，开始串扰测试。", closeSecondScreen: false);
         }
 
         if (_imageFiles.Count == 0)
@@ -651,5 +646,8 @@ public partial class ProjectionForm : Form
         _formCancellation.Cancel();
         _formCancellation.Dispose();
     }
+
+    /// <summary>供 Designer.Dispose 调用，确保直接释放控制窗体时第二屏窗口也会关闭。</summary>
+    private void DisposeSecondScreenProjection() => CloseSecondScreenProjection();
 
 }

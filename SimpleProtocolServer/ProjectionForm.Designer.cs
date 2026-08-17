@@ -16,6 +16,7 @@ partial class ProjectionForm
         if (disposing)
         {
             DisposeFormCancellation();
+            DisposeSecondScreenProjection();
             picPreview?.Image?.Dispose();
             components?.Dispose();
         }
@@ -32,7 +33,7 @@ partial class ProjectionForm
         btnApplyImageTransform = new Button();
         cmbImageTransform = new ComboBox();
         lblImageTransform = new Label();
-        chkRestoreWallpaper = new CheckBox();
+        chkCloseSecondScreenOnStop = new CheckBox();
         lblProjectionState = new Label();
         numProjectionIntervalSeconds = new NumericUpDown();
         btnTimedProjection = new Button();
@@ -69,7 +70,7 @@ partial class ProjectionForm
         grpSettings.Controls.Add(cmbImageTransform);
         grpSettings.Controls.Add(lblImageTransform);
         grpSettings.Controls.Add(btnProjectSelected);
-        grpSettings.Controls.Add(chkRestoreWallpaper);
+        grpSettings.Controls.Add(chkCloseSecondScreenOnStop);
         grpSettings.Controls.Add(lblProjectionState);
         grpSettings.Controls.Add(numProjectionIntervalSeconds);
         grpSettings.Controls.Add(btnTimedProjection);
@@ -118,17 +119,17 @@ partial class ProjectionForm
         lblImageTransform.TabIndex = 9;
         lblImageTransform.Text = "图片效果：";
         // 
-        // chkRestoreWallpaper
+        // chkCloseSecondScreenOnStop
         // 
-        chkRestoreWallpaper.AutoSize = true;
-        chkRestoreWallpaper.Checked = true;
-        chkRestoreWallpaper.CheckState = CheckState.Checked;
-        chkRestoreWallpaper.Location = new Point(862, 71);
-        chkRestoreWallpaper.Name = "chkRestoreWallpaper";
-        chkRestoreWallpaper.Size = new Size(206, 28);
-        chkRestoreWallpaper.TabIndex = 8;
-        chkRestoreWallpaper.Text = "停止/关闭后恢复桌面";
-        chkRestoreWallpaper.UseVisualStyleBackColor = true;
+        chkCloseSecondScreenOnStop.AutoSize = true;
+        chkCloseSecondScreenOnStop.Checked = true;
+        chkCloseSecondScreenOnStop.CheckState = CheckState.Checked;
+        chkCloseSecondScreenOnStop.Location = new Point(826, 71);
+        chkCloseSecondScreenOnStop.Name = "chkCloseSecondScreenOnStop";
+        chkCloseSecondScreenOnStop.Size = new Size(242, 28);
+        chkCloseSecondScreenOnStop.TabIndex = 8;
+        chkCloseSecondScreenOnStop.Text = "停止定时投图时关闭第二屏";
+        chkCloseSecondScreenOnStop.UseVisualStyleBackColor = true;
         // 
         // lblProjectionState
         // 
@@ -395,7 +396,7 @@ partial class ProjectionForm
     private Button btnApplyImageTransform;
     private ComboBox cmbImageTransform;
     private Label lblImageTransform;
-    private CheckBox chkRestoreWallpaper;
+    private CheckBox chkCloseSecondScreenOnStop;
     private NumericUpDown numProjectionIntervalSeconds;
     private Label lblProjectionIntervalSeconds;
     private Button btnApplyTopology;

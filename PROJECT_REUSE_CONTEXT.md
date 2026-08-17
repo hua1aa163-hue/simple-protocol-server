@@ -4,6 +4,8 @@
 > 来源项目：`SimpleProtocolServer`（.NET 8 Windows Forms）  
 > 用途：把本文件复制到其他项目根目录，交给开发人员或 Codex 阅读，即可了解已确认需求、协议规则、可复用模块和验收标准。
 
+版本说明：Git 标签 `v0.0.1` 保留了使用 Windows 桌面壁纸接口投图的旧方案；当前方案已改为只在第二屏显示的无边框全屏窗口。
+
 ## 1. 最终目标
 
 构建一个 Windows 桌面测试工具，包含以下能力：
@@ -15,7 +17,7 @@
 5. 支持 Windows 投影模式切换、图片切换、定时投图和投放列表中单击选中的图片。
 6. 支持对投放到第二屏幕的图片进行横向显示、横向翻转、上下翻转等处理，不改变显示器本身方向。
 7. 支持严格的整文件夹串扰测试：设备确认当前测试完成后，等待 1 秒，再投放下一张并发送下一次测试命令。
-8. 主界面与投影界面是两个可同时操作的非模态窗口。
+8. 主界面、投影控制界面和第二屏全屏图片窗口相互独立；控制窗口均保持可操作。
 9. 所有界面器件都应在 WinForms Designer 中创建和编辑；业务代码不负责动态拼装界面。
 10. 代码应有面向新手的中文注释，并把协议、网络、投影系统调用与窗体业务分层。
 
@@ -29,6 +31,7 @@
 - 默认选择只用于启动初始化，不能锁定命令下拉框；用户之后仍可选择其余 7 种命令。
 - 投影窗口默认选择“扩展屏幕”。
 - 第二屏图片效果默认选择“原图”，后续可选择横向显示、横向翻转、上下翻转或组合翻转。
+- 投图只使用非主屏；没有第二屏时明确提示，不允许全屏覆盖主控制屏。
 - 行间隔默认 1 秒；循环间隔默认 1 分钟；投图间隔默认 5 秒。
 
 ## 3. 标准命令协议
@@ -120,9 +123,11 @@
 - “横向显示”只在源图为竖图时顺时针旋转 90°；源图已经是横图时保持不变。
 - 图片效果只处理投放图片，不调用 Windows 显示方向接口，也不旋转第二块显示器。
 - 预览、手动投图、定时投图、投放选中图片和串扰测试均使用当前选择的图片效果。
-- 非 BMP 图片可转换到临时 BMP 缓存后再交给 Windows 壁纸接口。
-- 用户勾选恢复选项时，停止或关闭投影窗口后恢复原桌面图片。
-- 投影窗体必须使用 `Show()` 打开，不设置 `Owner`，不使用 `ShowDialog()`，从而保证主界面仍可点击。
+- 实际投图通过 `SecondScreenProjectionForm` 完成：无边框、置顶、黑色背景、PictureBox 使用 Zoom 完整显示。
+- 投图窗口只铺满第一个非主屏，不修改 Windows 桌面壁纸，不显示在任务栏。
+- 没有非主屏时投图失败并提示连接/启用扩展屏幕，不能回退覆盖主屏。
+- 第二屏窗体必须使用 `Show()` 打开，不设置 `Owner`，不使用 `ShowDialog()`，从而保证控制界面仍可点击。
+- 切图时在内存中释放上一张图片，不生成壁纸 BMP 缓存，也不锁定源文件。
 
 ## 8. 可直接迁移的模块
 
@@ -139,9 +144,10 @@
 | 投影抽象 | `Projection/IDesktopDisplayService.cs` | 隔离窗体与 Windows API | `DisplayTopology` |
 | 投影模式 | `Projection/DisplayTopology.cs` | 表示屏幕拓扑 | 无 |
 | 图片效果 | `Projection/ProjectedImageTransform.cs` | 处理横向、左右镜像、上下镜像和组合翻转 | `System.Drawing` |
-| Windows 实现 | `Projection/DesktopDisplayService.cs` | 切换投影模式、设置/恢复壁纸 | Windows API |
+| Windows 实现 | `Projection/DesktopDisplayService.cs` | 切换 Windows 投影拓扑 | Windows API |
 | 主窗体 | `MainForm.cs/.Designer.cs/.resx` | TCP、协议、循环发送协调 | 上述协议与网络模块 |
 | 投影窗体 | `ProjectionForm.cs/.Designer.cs/.resx` | 图片列表、投图和串扰循环 | 投影服务与发送委托 |
+| 第二屏窗体 | `SecondScreenProjectionForm.cs/.Designer.cs` | 非主屏无边框全屏图片显示 | 图片效果模块 |
 | 冒烟测试 | `SimpleProtocolServer.SmokeTests/Program.cs` | 协议、网络、循环、界面验证 | 主项目 |
 
 投影窗体与主窗体之间使用下面的异步委托作为边界：
@@ -166,10 +172,11 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 
 6. 命令选择事件统一调用 `SimpleMessageProtocol`，同步参数标签、是否可编辑、默认参数、预期返回和报文预览。
 7. 使用 `ProjectionForm(SendCurrentMessageAndWaitForCompletionAsync)` 传入串扰测试发送委托。
-8. 在投影窗体中提供原图、横向显示、横向翻转、上下翻转和组合翻转；通过 `IDesktopDisplayService.SetWallpaper` 的图片效果参数生成第二屏投图缓存。
-9. 使用非模态 `_projectionForm.Show()` 打开投影窗体。
-10. 把所有控件放在 `.Designer.cs` 中；业务 `.cs` 只编写事件和逻辑。
-11. 在项目文件中为两个窗体保存 `SubType`、`DependentUpon` 和资源归属关系，确保 Visual Studio Designer 能识别。
+8. 在投影控制窗体中提供原图、横向显示、横向翻转、上下翻转和组合翻转。
+9. 创建 `SecondScreenProjectionForm`：选择第一个非主屏，设置无边框、置顶、黑底、Zoom，并在内存中应用图片效果。
+10. 使用非模态 `_projectionForm.Show()` 打开控制窗体；第二屏窗体同样使用无 Owner 的 `Show()`。
+11. 把所有控件放在 `.Designer.cs` 中；业务 `.cs` 只编写事件和逻辑。
+12. 在项目文件中为三个窗体保存 `SubType`、`DependentUpon` 和资源归属关系，确保 Visual Studio Designer 能识别。
 
 ## 10. 设计器约束
 
@@ -179,7 +186,7 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 - 不要在业务代码中运行时创建固定按钮、标签、输入框或列表，否则无法在设计器中调节。
 - 不要把可视控件字段改为局部变量。
 - 不要手写覆盖 `Dispose(bool disposing)`；保留 Designer 的组件释放逻辑。
-- 修改布局后应分别打开两个窗体的 Visual Studio Designer，确认无加载错误。
+- 修改布局后应分别打开三个窗体的 Visual Studio Designer，确认无加载错误。
 
 ## 11. 验收清单
 
@@ -194,12 +201,14 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 - [ ] 投影窗口打开后主窗口仍可点击。
 - [ ] 投影窗口默认使用原图，并可预览、应用横向显示、横向翻转和上下翻转。
 - [ ] 图片翻转只改变投放图片，不旋转第二块显示器本身。
+- [ ] 第二屏图片通过无边框置顶窗口显示，不改变 Windows 桌面壁纸。
+- [ ] 全屏窗口只选择非主屏；单屏环境明确拒绝投图，不覆盖主界面。
 - [ ] 单击图片列表后可以投放选中图片。
 - [ ] 串扰测试收到 Run 后继续等待，收到最终 OK 后才进入下一张。
 - [ ] OK 后严格等待 1 秒再投放下一张。
 - [ ] 发送失败、NG、断线、超时或投图失败时不继续投下一张。
 - [ ] 文件夹中所有图片各测试一次后自动结束。
-- [ ] 两个窗体都能在 Visual Studio Designer 中打开并调节所有控件。
+- [ ] 三个窗体都能在 Visual Studio Designer 中打开并调节所有控件。
 
 建议验证命令：
 
@@ -221,11 +230,12 @@ dotnet run --project .\SimpleProtocolServer.SmokeTests\SimpleProtocolServer.Smok
 3. 程序启动默认选择“六、单次手动测试”，默认报文为 &|Meas|A|M|@，但后续仍可选择其他命令。
 4. 串扰测试严格执行：投放起始图片 → 发送报文 → 等待匹配的最终完成返回 → 等待 1 秒 → 投放下一张 → 再发送；Run 不是完成。
 5. 发送失败、NG、断线、超时或投图失败时立即停止，不继续投图。
-6. 投影窗口必须非模态且不设置 Owner，保证主界面可操作。
-7. 投影窗口必须提供原图、横向显示、横向翻转、上下翻转和组合翻转；效果作用于第二屏投放图片，不改变显示器方向。
-8. 所有固定控件必须可在 WinForms Designer 中编辑。
-9. 为新手添加中文注释，并补充与修改内容相称的自动测试。
-10. 完成后执行 Release 编译和冒烟测试，报告实际结果。
+6. 投影控制窗口必须非模态且不设置 Owner，保证主界面可操作。
+7. 必须使用非主屏上的无边框置顶全屏窗口投图，不得修改 Windows 桌面壁纸；没有第二屏时拒绝投图。
+8. 必须提供原图、横向显示、横向翻转、上下翻转和组合翻转；效果作用于第二屏图片，不改变显示器方向。
+9. 所有固定控件必须可在 WinForms Designer 中编辑。
+10. 为新手添加中文注释，并补充与修改内容相称的自动测试。
+11. 完成后执行 Release 编译和冒烟测试，报告实际结果。
 ```
 
 ## 13. 来源项目中的当前实现位置

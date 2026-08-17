@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <!--
-    显式告诉 Visual Studio：两个主 .cs 文件是 WinForms 窗体，
+    显式告诉 Visual Studio：三个 .cs 文件是 WinForms 窗体，
     Designer.cs 和 resx 分别从属于对应窗体。
     这些信息放在正式项目文件中，换电脑或删除 .csproj.user 后仍然有效。
   -->
@@ -33,6 +33,13 @@
     <EmbeddedResource Update="ProjectionForm.resx">
       <DependentUpon>ProjectionForm.cs</DependentUpon>
     </EmbeddedResource>
+
+    <Compile Update="SecondScreenProjectionForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="SecondScreenProjectionForm.Designer.cs">
+      <DependentUpon>SecondScreenProjectionForm.cs</DependentUpon>
+    </Compile>
   </ItemGroup>
 
 </Project>
