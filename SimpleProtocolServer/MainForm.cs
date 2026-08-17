@@ -4,6 +4,7 @@ using System.Net;
 using SimpleProtocolServer.Networking;
 using SimpleProtocolServer.Projection;
 using SimpleProtocolServer.Protocol;
+using SimpleProtocolServer.Settings;
 
 namespace SimpleProtocolServer;
 
@@ -21,6 +22,8 @@ public partial class MainForm : Form
     private readonly CancellationTokenSource _formCancellation = new();
     // 保存定时发送启动时的报文列表快照及“下一条”位置。
     private readonly CycleMessageSequence _cycleMessages = new();
+    // 主窗体和投影窗体共享同一个设置对象，避免后关闭的窗体覆盖另一窗体的新设置。
+    private readonly UserPreferences _preferences;
 
     // 以下字段保存跨事件的运行状态。WinForms 每次点击/Timer Tick 都会进入不同方法，
     // 因此需要字段记住“当前是否正在运行”和相关取消信号。
@@ -32,15 +35,62 @@ public partial class MainForm : Form
     private bool _isClosing;
 
     /// <summary>创建主窗体，并订阅 TCP 服务的连接、收包和断线事件。</summary>
-    public MainForm()
+    public MainForm() : this(UserPreferencesStore.Load())
     {
+    }
+
+    /// <summary>注入设置的构造函数供烟雾测试使用，也让首次默认值不依赖电脑上的旧配置。</summary>
+    internal MainForm(UserPreferences preferences)
+    {
+        _preferences = preferences ?? throw new ArgumentNullException(nameof(preferences));
         InitializeComponent();
-        // 程序启动时默认选择“六、单次手动测试”；选择事件会同步生成对应参数状态和报文。
-        // 这里只设置初始选择，不会锁定下拉框，用户之后仍可选择其他命令。
-        cmbCommand.SelectedIndex = (int)CommandType.SingleManual;
+        RestoreMainPreferences();
         _tcpServer.ClientConnected += TcpServer_ClientConnected;
         _tcpServer.MessageReceived += TcpServer_MessageReceived;
         _tcpServer.ConnectionClosed += TcpServer_ConnectionClosed;
+    }
+
+    /// <summary>把上次保存的数据恢复到主界面控件，并对越界旧值进行保护。</summary>
+    private void RestoreMainPreferences()
+    {
+        cmbCommand.SelectedIndex = Math.Clamp(
+            _preferences.CommandIndex, 0, cmbCommand.Items.Count - 1);
+
+        // 选择命令时已经生成协议默认值；只有确实保存过时才用上次编辑值覆盖。
+        if (_preferences.Parameter is not null) txtParameter.Text = _preferences.Parameter;
+        if (_preferences.SendPreview is not null) txtSendPreview.Text = _preferences.SendPreview;
+
+        numIntervalMinutes.Value = ClampNumeric(
+            numIntervalMinutes, _preferences.CycleIntervalMinutes);
+        numRowIntervalSeconds.Value = ClampNumeric(
+            numRowIntervalSeconds, _preferences.RowIntervalSeconds);
+
+        lstCycleMessages.Items.Clear();
+        foreach (string message in _preferences.CycleMessages.Where(item => item is not null))
+        {
+            lstCycleMessages.Items.Add(message);
+        }
+        UpdateCycleHint();
+    }
+
+    /// <summary>NumericUpDown 只接受最小值与最大值之间的数据。</summary>
+    private static decimal ClampNumeric(NumericUpDown control, decimal value) =>
+        Math.Clamp(value, control.Minimum, control.Maximum);
+
+    /// <summary>从主界面收集当前值；投影界面的值由共享对象中的其他字段保留。</summary>
+    private void SaveMainPreferences()
+    {
+        _preferences.CommandIndex = cmbCommand.SelectedIndex;
+        _preferences.Parameter = txtParameter.Text;
+        _preferences.SendPreview = txtSendPreview.Text;
+        _preferences.CycleIntervalMinutes = numIntervalMinutes.Value;
+        _preferences.RowIntervalSeconds = numRowIntervalSeconds.Value;
+        _preferences.CycleMessages = lstCycleMessages.Items.Cast<string>().ToList();
+
+        if (!UserPreferencesStore.TrySave(_preferences, out string error))
+        {
+            System.Diagnostics.Debug.WriteLine($"保存用户设置失败：{error}");
+        }
     }
 
     /// <summary>窗体首次显示时自动开始监听端口。</summary>
@@ -590,7 +640,8 @@ public partial class MainForm : Form
             return;
         }
 
-        _projectionForm = new ProjectionForm(SendCurrentMessageAndWaitForCompletionAsync);
+        _projectionForm = new ProjectionForm(
+            _preferences, SendCurrentMessageAndWaitForCompletionAsync);
         _projectionForm.FormClosed += ProjectionForm_FormClosed;
 
         // 不设置 Owner、不使用 ShowDialog：两个窗口相互独立，主界面仍可操作。
@@ -619,6 +670,8 @@ public partial class MainForm : Form
             _projectionForm.Close();
             _projectionForm = null;
         }
+        // 投影窗体先关闭并写回共享对象，再保存主界面字段，最终文件包含两边的最新值。
+        SaveMainPreferences();
         _tcpServer.ClientConnected -= TcpServer_ClientConnected;
         _tcpServer.MessageReceived -= TcpServer_MessageReceived;
         _tcpServer.ConnectionClosed -= TcpServer_ConnectionClosed;

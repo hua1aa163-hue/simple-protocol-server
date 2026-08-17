@@ -6,6 +6,13 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- 发布版本使用用户指定的 v1.0.260817；程序集版本单独保持在 Windows 允许的范围内。 -->
+    <Version>1.0.260817</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <!-- 260817 超过 Windows 单段 65534 上限，因此拆成 26081.7。 -->
+    <FileVersion>1.0.26081.7</FileVersion>
+    <InformationalVersion>1.0.260817</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <!-- 第二屏跨不同 DPI 时仍使用实际设备像素，保证源图与屏幕严格 1:1。 -->
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
   </PropertyGroup>

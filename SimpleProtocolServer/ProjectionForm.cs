@@ -1,6 +1,8 @@
 // 投影窗体负责图片列表、Windows 投图和串扰批量流程。
 // 它不直接操作 TCP，而是通过构造函数传入的回调请 MainForm 发送并等待设备完成。
+using SimpleProtocolServer.DataProcessing;
 using SimpleProtocolServer.Projection;
+using SimpleProtocolServer.Settings;
 
 namespace SimpleProtocolServer;
 
@@ -19,6 +21,8 @@ public partial class ProjectionForm : Form
     private readonly CancellationTokenSource _formCancellation = new();
     // 回调由 MainForm 传入：返回 true 代表报文发送且设备最终确认成功。
     private readonly Func<CancellationToken, Task<bool>>? _sendCurrentMessageAsync;
+    // 与主界面共享同一个设置对象，避免两个窗体保存时互相覆盖。
+    private readonly UserPreferences _preferences;
     // 当前目录中按文件名排序后的图片完整路径。
     private List<string> _imageFiles = [];
     // 单独控制“串扰测试”批次的停止，不必关闭整个窗口。
@@ -33,21 +37,63 @@ public partial class ProjectionForm : Form
     private bool _isTimedProjectionRunning;
 
     /// <summary>供 WinForms 设计器和烟雾测试使用的无参数构造函数。</summary>
-    public ProjectionForm()
+    public ProjectionForm() : this(new UserPreferences(), null, isDesignerConstruction: true)
     {
-        InitializeComponent();
-        if (cmbTopology.Items.Count > 4) cmbTopology.SelectedIndex = 4;
-        if (cmbImageTransform.Items.Count > 0) cmbImageTransform.SelectedIndex = 0;
     }
 
-    /// <summary>
-    /// 正常运行时由 MainForm 调用，并传入“发送报文且等待最终返回”的异步方法。
-    /// </summary>
-    internal ProjectionForm(Func<CancellationToken, Task<bool>> sendCurrentMessageAsync)
-        : this()
+    /// <summary>由主界面调用，同时取得共享设置和“发送并等待完成”的回调。</summary>
+    internal ProjectionForm(
+        UserPreferences preferences,
+        Func<CancellationToken, Task<bool>> sendCurrentMessageAsync)
+        : this(preferences, sendCurrentMessageAsync, isDesignerConstruction: false)
     {
-        _sendCurrentMessageAsync = sendCurrentMessageAsync ??
-            throw new ArgumentNullException(nameof(sendCurrentMessageAsync));
+    }
+
+    /// <summary>统一完成控件初始化和上次设置恢复；null 回调用于设计器与烟雾测试。</summary>
+    private ProjectionForm(
+        UserPreferences preferences,
+        Func<CancellationToken, Task<bool>>? sendCurrentMessageAsync,
+        bool isDesignerConstruction)
+    {
+        // isDesignerConstruction 只用于区分构造函数签名；无参数构造仍会使用完整默认设置。
+        _ = isDesignerConstruction;
+        _preferences = preferences ?? throw new ArgumentNullException(nameof(preferences));
+        _sendCurrentMessageAsync = sendCurrentMessageAsync;
+        InitializeComponent();
+        RestoreProjectionPreferences();
+    }
+
+    /// <summary>把上次关闭前的投影、图片和数据目录选项恢复到设计器控件。</summary>
+    private void RestoreProjectionPreferences()
+    {
+        txtImageDirectory.Text = _preferences.ImageDirectory;
+        cmbTopology.SelectedIndex = Math.Clamp(
+            _preferences.ProjectionTopologyIndex, 0, cmbTopology.Items.Count - 1);
+        cmbImageTransform.SelectedIndex = Math.Clamp(
+            _preferences.ImageTransformIndex, 0, cmbImageTransform.Items.Count - 1);
+        numProjectionIntervalSeconds.Value = Math.Clamp(
+            _preferences.ProjectionIntervalSeconds,
+            numProjectionIntervalSeconds.Minimum,
+            numProjectionIntervalSeconds.Maximum);
+        chkCloseSecondScreenOnStop.Checked = _preferences.CloseSecondScreenOnStop;
+        txtDataSourceDirectory.Text = _preferences.DataSourceDirectory;
+        txtOutputDirectory.Text = _preferences.DataOutputDirectory;
+    }
+
+    /// <summary>收集投影窗体当前值并写入当前 Windows 用户的 JSON 配置。</summary>
+    private void SaveProjectionPreferences()
+    {
+        _preferences.ImageDirectory = txtImageDirectory.Text;
+        _preferences.ProjectionTopologyIndex = cmbTopology.SelectedIndex;
+        _preferences.ImageTransformIndex = cmbImageTransform.SelectedIndex;
+        _preferences.ProjectionIntervalSeconds = numProjectionIntervalSeconds.Value;
+        _preferences.CloseSecondScreenOnStop = chkCloseSecondScreenOnStop.Checked;
+        _preferences.DataSourceDirectory = txtDataSourceDirectory.Text;
+        _preferences.DataOutputDirectory = txtOutputDirectory.Text;
+        if (!UserPreferencesStore.TrySave(_preferences, out string error))
+        {
+            System.Diagnostics.Debug.WriteLine($"保存投影设置失败：{error}");
+        }
     }
 
     /// <summary>首次打开窗口时使用“图片”目录，并加载图片列表。</summary>
@@ -78,6 +124,26 @@ public partial class ProjectionForm : Form
             txtImageDirectory.Text = dialog.SelectedPath;
             RefreshImageList(showError: true);
         }
+    }
+
+    /// <summary>选择设备原始导出数据的根目录。</summary>
+    private void btnBrowseDataSourceDirectory_Click(object? sender, EventArgs e) =>
+        BrowseForFolder(txtDataSourceDirectory, "选择 GYTech 测试数据导出根目录", false);
+
+    /// <summary>选择统一保存原始数据副本、结果 Excel 和热力图的根目录。</summary>
+    private void btnBrowseOutputDirectory_Click(object? sender, EventArgs e) =>
+        BrowseForFolder(txtOutputDirectory, "选择串扰测试结果输出目录", true);
+
+    /// <summary>两个数据目录按钮共用的文件夹选择逻辑。</summary>
+    private void BrowseForFolder(TextBox target, string description, bool showNewFolderButton)
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = description,
+            SelectedPath = Directory.Exists(target.Text.Trim()) ? target.Text.Trim() : string.Empty,
+            ShowNewFolderButton = showNewFolderButton
+        };
+        if (dialog.ShowDialog(this) == DialogResult.OK) target.Text = dialog.SelectedPath;
     }
 
     /// <summary>重新扫描当前目录。</summary>
@@ -237,7 +303,7 @@ public partial class ProjectionForm : Form
         btnProjectNext.Enabled = !running && !_isCrosstalkRunning;
         btnProjectSelected.Enabled = !running && !_isCrosstalkRunning;
         lvImages.Enabled = !running && !_isCrosstalkRunning;
-        button1.Enabled = !running && !_isCrosstalkRunning;
+        btnCrosstalkTest.Enabled = !running && !_isCrosstalkRunning;
         btnTimedProjection.Text = running ? "停止定时投图" : "开始定时投图";
         lblProjectionState.Text = running ? "定时投图中" : "未启动定时投图";
     }
@@ -394,8 +460,8 @@ public partial class ProjectionForm : Form
             .ToList();
 
     /// <summary>
-    /// 生成串扰测试顺序。例如 4 张图从下标 2 开始，顺序为 2、3、0、1。
-    /// 这样可以从任意选中图开始，又保证每张图只测试一次。
+    /// 生成串扰测试顺序。最后一张按 MATLAB 约定固定为本底并永远最后测试；
+    /// 其余图片仍可从选中项开始循环。例如 5 张图从下标 2 开始：2、3、0、1、4。
     /// </summary>
     internal static IReadOnlyList<int> BuildImageTestOrder(int startIndex, int imageCount)
     {
@@ -405,8 +471,13 @@ public partial class ProjectionForm : Form
             throw new ArgumentOutOfRangeException(nameof(startIndex));
         }
 
-        return Enumerable.Range(0, imageCount)
-            .Select(offset => (startIndex + offset) % imageCount)
+        if (imageCount == 1) return [0];
+
+        int signalImageCount = imageCount - 1;
+        int signalStartIndex = startIndex == imageCount - 1 ? 0 : startIndex;
+        return Enumerable.Range(0, signalImageCount)
+            .Select(offset => (signalStartIndex + offset) % signalImageCount)
+            .Append(imageCount - 1)
             .ToArray();
     }
 
@@ -496,6 +567,7 @@ public partial class ProjectionForm : Form
     /// <summary>关闭前取消批量任务、停止计时器，并关闭第二屏全屏窗口。</summary>
     private void ProjectionForm_FormClosing(object? sender, FormClosingEventArgs e)
     {
+        SaveProjectionPreferences();
         _crosstalkCancellation?.Cancel();
         _formCancellation.Cancel();
 
@@ -510,12 +582,12 @@ public partial class ProjectionForm : Form
     /// “串扰测试/停止串扰测试”按钮入口。
     /// 流程为：投图 → 发送并等待设备完成 → 下一张，直到每张图片恰好完成一次。
     /// </summary>
-    private async void button1_Click(object? sender, EventArgs e)
+    private async void btnCrosstalkTest_Click(object? sender, EventArgs e)
     {
         if (_isCrosstalkRunning)
         {
-            button1.Enabled = false;
-            button1.Text = "正在停止...";
+            btnCrosstalkTest.Enabled = false;
+            btnCrosstalkTest.Text = "正在停止...";
             _crosstalkCancellation?.Cancel();
             return;
         }
@@ -539,9 +611,25 @@ public partial class ProjectionForm : Form
         }
 
         // 优先从列表当前选中项开始；没有选中项时使用已投图片，最后才回退到第一张。
-        int startIndex = lvImages.SelectedIndices.Count == 1
+        int requestedStartIndex = lvImages.SelectedIndices.Count == 1
             ? lvImages.SelectedIndices[0]
             : _currentImageIndex >= 0 ? _currentImageIndex : 0;
+        // 最后一张图片是 MATLAB 公式使用的本底；即使用户选中它，也必须把它留到最后。
+        int startIndex = requestedStartIndex == _imageFiles.Count - 1 ? 0 : requestedStartIndex;
+
+        // 在发送第一条报文前记录历史目录快照，测试结束后只读取本轮新增或更新的数据。
+        if (!TryPrepareDataDirectories(
+                out string dataSourceDirectory,
+                out string outputDirectory,
+                out IReadOnlyDictionary<string, ExportFolderFingerprint> exportSnapshot))
+        {
+            return;
+        }
+        if (requestedStartIndex != startIndex)
+        {
+            AppendLog("选中的是最后一张本底图；本轮改从第一张开始，本底图仍在最后测试。");
+        }
+        DateTime testStartedUtc = DateTime.UtcNow;
 
         ResetImageTestStatuses();
         if (!ProjectImageAtIndex(startIndex, showError: true)) return;
@@ -552,6 +640,7 @@ public partial class ProjectionForm : Form
         _crosstalkCancellation = crosstalkCancellation;
         SetCrosstalkState(true);
         IReadOnlyList<int> testOrder = BuildImageTestOrder(startIndex, _imageFiles.Count);
+        var completedTests = new List<CrosstalkTestRecord>(testOrder.Count);
         AppendLog(
             $"开始串扰测试：共 {testOrder.Count} 张，从 {Path.GetFileName(_imageFiles[startIndex])} 开始。");
 
@@ -596,12 +685,42 @@ public partial class ProjectionForm : Form
                 }
 
                 item.SubItems[2].Text = "测试完成";
+                completedTests.Add(new CrosstalkTestRecord(
+                    position + 1, _imageFiles[imageIndex], DateTime.UtcNow));
                 AppendLog($"[{position + 1}/{testOrder.Count}] 测试完成。");
             }
 
-            lblProjectionState.Text = $"串扰测试完成：{testOrder.Count} 张图片";
+            lblProjectionState.Text = $"测试完成，正在处理 {testOrder.Count} 份数据...";
             AppendLog($"串扰测试全部完成：共 {testOrder.Count} 张图片。");
-            MessageBox.Show(this, $"文件夹内 {testOrder.Count} 张图片已全部测试完成。",
+            lblDataProcessingState.Text = "正在匹配本次导出数据并按 MATLAB 程序计算...";
+
+            // Progress 会把后台处理进度安全地送回当前 WinForms 界面线程。
+            var progress = new Progress<string>(message =>
+            {
+                if (IsDisposed || Disposing) return;
+                lblDataProcessingState.Text = message;
+                AppendLog(message);
+            });
+            CrosstalkProcessingResult result = await
+                CrosstalkDataProcessor.ProcessCompletedTestAsync(
+                    dataSourceDirectory,
+                    outputDirectory,
+                    testStartedUtc,
+                    exportSnapshot,
+                    completedTests,
+                    progress,
+                    crosstalkCancellation.Token);
+            crosstalkCancellation.Token.ThrowIfCancellationRequested();
+
+            lblProjectionState.Text = $"串扰测试及数据处理完成：{testOrder.Count} 张图片";
+            lblDataProcessingState.Text = $"结果：{result.OutputDirectory}";
+            AppendLog($"数据处理完成：{result.OutputDirectory}");
+            MessageBox.Show(this,
+                $"文件夹内 {testOrder.Count} 张图片已全部测试并完成数据处理。\r\n\r\n" +
+                $"Max：{result.Calculation.Maximum * 100:0.000}%\r\n" +
+                $"Min：{result.Calculation.Minimum * 100:0.000}%\r\n" +
+                $"Mean：{result.Calculation.Mean * 100:0.000}%\r\n\r\n" +
+                $"结果目录：\r\n{result.OutputDirectory}",
                 "串扰测试完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (OperationCanceledException)
@@ -610,6 +729,19 @@ public partial class ProjectionForm : Form
             {
                 lblProjectionState.Text = "串扰测试已停止";
                 AppendLog("串扰测试已停止，不再继续投图。");
+            }
+        }
+        catch (Exception ex)
+        {
+            // 此时图片测试可能已完成，但数据读取或计算失败；保留设备原始目录，便于修正后重试。
+            if (!IsDisposed && !Disposing)
+            {
+                lblProjectionState.Text = "测试已结束，但数据处理失败";
+                lblDataProcessingState.Text = ex.Message;
+                AppendLog($"数据处理失败：{ex.Message}");
+                MessageBox.Show(this,
+                    $"串扰测试已停止或完成，但数据处理未成功：\r\n{ex.Message}",
+                    "数据处理失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
         finally
@@ -633,8 +765,73 @@ public partial class ProjectionForm : Form
         btnProjectNext.Enabled = !running && !_isTimedProjectionRunning;
         btnProjectSelected.Enabled = !running && !_isTimedProjectionRunning;
         lvImages.Enabled = !running && !_isTimedProjectionRunning;
-        button1.Enabled = true;
-        button1.Text = running ? "停止串扰测试" : "串扰测试";
+        grpData.Enabled = !running;
+        btnCrosstalkTest.Enabled = true;
+        btnCrosstalkTest.Text = running ? "停止串扰测试" : "串扰测试";
+    }
+
+    /// <summary>测试前检查两个可选目录，并保存一份原始导出目录快照。</summary>
+    private bool TryPrepareDataDirectories(
+        out string sourceDirectory,
+        out string outputDirectory,
+        out IReadOnlyDictionary<string, ExportFolderFingerprint> snapshot)
+    {
+        sourceDirectory = txtDataSourceDirectory.Text.Trim();
+        outputDirectory = txtOutputDirectory.Text.Trim();
+        snapshot = new Dictionary<string, ExportFolderFingerprint>();
+        if (_imageFiles.Count < 3 || _imageFiles.Count % 2 == 0)
+        {
+            MessageBox.Show(this,
+                $"MATLAB 串扰计算要求图片数为大于等于 3 的奇数：前后两组数量相同，最后一张为本底。\r\n" +
+                $"当前图片数：{_imageFiles.Count}",
+                "图片数量不符合计算规则", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
+        }
+        if (!Directory.Exists(sourceDirectory))
+        {
+            MessageBox.Show(this, "原始数据目录不存在，请重新选择。", "数据目录",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            txtDataSourceDirectory.Focus();
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(outputDirectory))
+        {
+            MessageBox.Show(this, "请选择结果输出目录。", "输出目录",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            txtOutputDirectory.Focus();
+            return false;
+        }
+
+        try
+        {
+            sourceDirectory = Path.GetFullPath(sourceDirectory);
+            outputDirectory = Path.GetFullPath(outputDirectory);
+            string sourcePrefix = sourceDirectory.TrimEnd(
+                Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
+                Path.DirectorySeparatorChar;
+            bool outputIsNestedInSource = !string.Equals(
+                    sourceDirectory, outputDirectory, StringComparison.OrdinalIgnoreCase) &&
+                outputDirectory.StartsWith(sourcePrefix, StringComparison.OrdinalIgnoreCase);
+            if (outputIsNestedInSource)
+            {
+                MessageBox.Show(this,
+                    "结果目录不能放在原始数据目录的某个子文件夹内，否则复制原始文件时可能形成递归。\r\n" +
+                    "可以选择原始数据根目录本身，或选择完全独立的目录。",
+                    "输出目录位置不安全", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+
+            Directory.CreateDirectory(outputDirectory);
+            snapshot = CrosstalkDataProcessor.CaptureSnapshot(sourceDirectory);
+            return true;
+        }
+        catch (Exception ex) when (
+            ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            MessageBox.Show(this, $"无法读取或创建数据目录：\r\n{ex.Message}", "数据目录",
+                MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
     }
 
     /// <summary>安全且只执行一次地取消并释放窗体级 CancellationTokenSource。</summary>

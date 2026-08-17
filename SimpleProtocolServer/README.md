@@ -18,6 +18,16 @@
 
 客户端断开或停止监听时，定时发送会自动停止。同一时间只能有一个程序监听 `9527` 端口。
 
+## 串扰数据自动处理
+
+投影窗口下方可以选择原始数据目录和结果输出目录。原始目录首次默认是 `D:\Program Files\GYTech\Setup_MRTest\ExportFile`。开始测试前，程序会记录该目录下已有的一级文件夹；全部图片成功后，再按本轮测试开始时间、每次完成时间和测试次数匹配新增导出文件夹，不会把历史测试混入本批结果。
+
+图片总数必须是大于等于 3 的奇数。前后两组图片数量相同，图片列表最后一张固定为本底并最后测试；其余图片仍可从当前选中项开始循环。每个匹配文件夹按名称读取第一个 XLSX 的 `Brightness` 工作表 C 列，执行用户 MATLAB 程序的 612 行、19×32、3% 异常阈值和边框规则。
+
+每批结果新建一个独立目录，其中包含完整“原始数据”副本、测试与原始文件对应表、合并原始矩阵 Excel、串扰结果 Excel（Sheet1 为逐点结果，Sheet2 为 Max/Min/Mean）和 1500×900、300 DPI 热力图 PNG。
+
+主界面的命令、参数、可编辑报文、循环列表和两个间隔，以及投影窗口的所有目录、下拉选项、投图间隔和复选框，都会在正常关闭时保存到当前 Windows 用户的本地配置目录；下一次打开自动恢复。首次运行仍默认选择“六、单次手动测试”。
+
 ## 新手源码阅读顺序
 
 1. `Program.cs`：程序入口，了解 WinForms 如何启动主窗体。
@@ -26,10 +36,13 @@
 4. `MainForm.cs`：了解界面如何调用协议层和网络层，以及循环列表的双间隔发送逻辑。
 5. `Protocol/CommandResponseMatcher.cs`：了解串扰测试如何区分 `Run`、最终 `OK`、`NG` 和无关返回。
 6. `ProjectionForm.cs`：了解图片扫描、手动/定时投图和整文件夹串扰测试循环。
-7. `SecondScreenProjectionForm.cs` 和 `Projection/PixelPerfectImageControl.cs`：了解如何寻找非主屏并严格按 1:1 像素显示图片。
-8. `Projection/DesktopDisplayService.cs`：最后再看 Windows API 和投影模式切换。
-9. `*.Designer.cs`：这些是设计器生成的控件布局代码，理解控件名称和事件绑定即可，不建议逐行阅读坐标。
-10. `SimpleProtocolServer.SmokeTests/Program.cs`：通过测试用例回顾各模块的预期行为。
+7. `DataProcessing/CrosstalkDataProcessor.cs`：了解 MATLAB 公式、时间/次数匹配、原始数据归档和结果输出。
+8. `DataProcessing/SimpleXlsx.cs`：了解如何读取 Brightness C 列及写入结果工作簿。
+9. `Settings/UserPreferences.cs`：了解上次界面值如何保存和恢复。
+10. `SecondScreenProjectionForm.cs` 和 `Projection/PixelPerfectImageControl.cs`：了解如何寻找非主屏并严格按 1:1 像素显示图片。
+11. `Projection/DesktopDisplayService.cs`：最后再看 Windows API 和投影模式切换。
+12. `*.Designer.cs`：这些是设计器生成的控件布局代码，理解控件名称和事件绑定即可，不建议逐行阅读坐标。
+13. `SimpleProtocolServer.SmokeTests/Program.cs`：通过测试用例回顾各模块的预期行为。
 
 ## 设计器编辑
 

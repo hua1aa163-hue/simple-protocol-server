@@ -4,10 +4,13 @@ using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
+using System.IO.Compression;
 using SimpleProtocolServer;
+using SimpleProtocolServer.DataProcessing;
 using SimpleProtocolServer.Networking;
 using SimpleProtocolServer.Projection;
 using SimpleProtocolServer.Protocol;
+using SimpleProtocolServer.Settings;
 
 // 第一组：八种界面命令都必须生成协议约定的准确字符串。
 var protocolCases = new (CommandType Command, string Parameter, string Expected)[]
@@ -61,9 +64,10 @@ Assert(CommandResponseMatcher.GetResponseTimeout("&|Stop|@") == TimeSpan.FromSec
        CommandResponseMatcher.GetResponseTimeout("&|Meas|A|A|@") == TimeSpan.FromSeconds(600),
     "普通命令与测量命令的返回超时时间不正确");
 
-// 从列表中间开始时应绕回开头，但每张图片只能出现一次。
-Assert(ProjectionForm.BuildImageTestOrder(2, 4).SequenceEqual([2, 3, 0, 1]),
-    "串扰测试没有从选中图片开始将文件夹图片各测试一次");
+// 从列表中间开始时应绕回开头，但最后一张本底必须固定在最后且每张只出现一次。
+Assert(ProjectionForm.BuildImageTestOrder(2, 5).SequenceEqual([2, 3, 0, 1, 4]) &&
+       ProjectionForm.BuildImageTestOrder(4, 5).SequenceEqual([0, 1, 2, 3, 4]),
+    "串扰测试没有从选中图片开始，或没有把最后一张本底固定在最后");
 
 // 图片效果处理的是第二屏幕上的图片，不会改变显示器本身的方向。
 using (var portraitImage = new Bitmap(2, 3))
@@ -105,7 +109,100 @@ Assert(PixelPerfectImageControl.CalculateImageLocation(
            new Size(1920, 1080), new Size(3840, 2160)) == new Point(-960, -540),
     "像素对像素投图的居中或裁切坐标不正确");
 
-// 第四组：循环报文走到末尾后必须重新从第一条开始。
+// 第四组：把 MATLAB 串扰公式喂入已知比例，验证 612 点、19×32 还原和统计剔除。
+var mergedBrightness = new double[CrosstalkDataProcessor.ExpectedBrightnessRows, 3];
+for (int row = 1; row < CrosstalkDataProcessor.ExpectedBrightnessRows; row++)
+{
+    // 最后一列是本底 0；前两列 100 和 1 的双向比值为 100 与 0.01，最小值应为 1%。
+    mergedBrightness[row, 0] = 100;
+    mergedBrightness[row, 1] = 1;
+    mergedBrightness[row, 2] = 0;
+}
+CrosstalkCalculationResult calculated = CrosstalkDataProcessor.Calculate(mergedBrightness);
+Assert(calculated.ValuesForHeatmap.GetLength(0) == 19 &&
+       calculated.ValuesForHeatmap.GetLength(1) == 32 &&
+       Math.Abs(calculated.Maximum - 0.01) < 0.0000001 &&
+       Math.Abs(calculated.Minimum - 0.01) < 0.0000001 &&
+       Math.Abs(calculated.Mean - 0.01) < 0.0000001 &&
+       double.IsNaN(calculated.ValuesForHeatmap[0, 0]) &&
+       Math.Abs(calculated.ValuesForHeatmap[1, 1] - 0.01) < 0.0000001,
+    "MATLAB 等价串扰计算、19×32 还原、边框剔除或统计结果不正确");
+
+// 生成一个最小 XLSX 再读回 Brightness C 列，验证设备 C3:C614 被归一为 612 行的规则。
+string smokeDirectory = Path.Combine(
+    Path.GetTempPath(), "SimpleProtocolServerSmokeTests", Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(smokeDirectory);
+try
+{
+    var brightnessSheet = new object?[614, 3];
+    brightnessSheet[2, 2] = "Lv(cd/m²)";
+    for (int row = 3; row < 614; row++) brightnessSheet[row, 2] = row - 2 + 0.25;
+    string brightnessPath = Path.Combine(smokeDirectory, "brightness.xlsx");
+    SimpleXlsx.WriteWorkbook(brightnessPath,
+        [new XlsxSheetData("Brightness", brightnessSheet)]);
+    double[] readBrightness = SimpleXlsx.ReadNumericColumn(brightnessPath, "Brightness", 3);
+    Assert(readBrightness.Length == 612 && double.IsNaN(readBrightness[0]) &&
+           Math.Abs(readBrightness[1] - 1.25) < 0.0000001,
+        "XLSX 工具没有正确读取 Brightness 工作表 C 列");
+
+    // 把计算结果写成双工作表 Excel 和 300 DPI PNG，确认文件结构及图片尺寸都完整。
+    string crosstalkPath = Path.Combine(smokeDirectory, "crosstalk.xlsx");
+    string heatmapPath = Path.Combine(smokeDirectory, "crosstalk.png");
+    CrosstalkDataProcessor.WriteCrosstalkWorkbook(crosstalkPath, calculated);
+    CrosstalkDataProcessor.WriteHeatmap(heatmapPath, "smoke-test", calculated.ValuesForHeatmap);
+    using (ZipArchive workbookArchive = ZipFile.OpenRead(crosstalkPath))
+    {
+        Assert(workbookArchive.GetEntry("xl/worksheets/sheet1.xml") is not null &&
+               workbookArchive.GetEntry("xl/worksheets/sheet2.xml") is not null,
+            "串扰结果 Excel 缺少 Sheet1 或 Sheet2");
+    }
+    using (Image heatmap = Image.FromFile(heatmapPath))
+    {
+        Assert(heatmap.Width == 1500 && heatmap.Height == 900 &&
+               Math.Abs(heatmap.HorizontalResolution - 300) < 0.1,
+            "串扰热力图不是 1500×900、300 DPI");
+    }
+
+    // 设置文件使用临时路径，验证空文本、循环列表和各类选项均能跨启动恢复。
+    string settingsPath = Path.Combine(smokeDirectory, "settings.json");
+    var savedPreferences = new UserPreferences
+    {
+        CommandIndex = (int)CommandType.SwitchRecipe,
+        Parameter = "last_recipe",
+        SendPreview = "&|Custom|last|@",
+        CycleMessages = ["&|Stop|@", "&|FF|7500|@"],
+        CycleIntervalMinutes = 2.5m,
+        RowIntervalSeconds = 3m,
+        ImageDirectory = @"C:\Images",
+        ProjectionTopologyIndex = 0,
+        ImageTransformIndex = 3,
+        ProjectionIntervalSeconds = 9m,
+        CloseSecondScreenOnStop = false,
+        DataSourceDirectory = @"C:\Exports",
+        DataOutputDirectory = @"C:\Results"
+    };
+    Assert(UserPreferencesStore.TrySaveToPath(savedPreferences, settingsPath, out _),
+        "用户设置无法保存");
+    UserPreferences loadedPreferences = UserPreferencesStore.LoadFromPath(settingsPath);
+    Assert(loadedPreferences.CommandIndex == savedPreferences.CommandIndex &&
+           loadedPreferences.Parameter == savedPreferences.Parameter &&
+           loadedPreferences.SendPreview == savedPreferences.SendPreview &&
+           loadedPreferences.CycleMessages.SequenceEqual(savedPreferences.CycleMessages) &&
+           loadedPreferences.CycleIntervalMinutes == 2.5m &&
+           loadedPreferences.RowIntervalSeconds == 3m &&
+           loadedPreferences.ImageTransformIndex == 3 &&
+           !loadedPreferences.CloseSecondScreenOnStop &&
+           loadedPreferences.DataSourceDirectory == @"C:\Exports" &&
+           loadedPreferences.DataOutputDirectory == @"C:\Results",
+        "用户上次修改的文本、列表或选项没有完整恢复");
+}
+finally
+{
+    // 此目录由本测试用 GUID 创建，只包含测试文件，可以安全清理。
+    if (Directory.Exists(smokeDirectory)) Directory.Delete(smokeDirectory, recursive: true);
+}
+
+// 第五组：循环报文走到末尾后必须重新从第一条开始。
 var cycle = new CycleMessageSequence();
 cycle.Reset(["&|Stop|@", "&|FF|7500|@"]);
 Assert(cycle.TryGetNext(out string cycle1, out int position1) &&
@@ -121,7 +218,7 @@ Assert(CycleSendTiming.GetNextIntervalMilliseconds(1, 2, 3m, 0.5m) == 3_000 &&
        CycleSendTiming.GetNextIntervalMilliseconds(2, 2, 3m, 0.5m) == 30_000,
     "循环列表没有区分行间隔与末行后的循环间隔");
 
-// 第五组：启动真实的本机 TCP 服务器和客户端，验证双向收发。
+// 第六组：启动真实的本机 TCP 服务器和客户端，验证双向收发。
 await using var server = new TcpMessageServer();
 // TaskCompletionSource 让事件可以被 await，并给测试设置明确的超时时间。
 var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -166,14 +263,14 @@ await receivedTwice.Task.WaitAsync(TimeSpan.FromSeconds(3));
 Assert(received.SequenceEqual([response1, response2]), "TCP 拆包或粘包处理不正确");
 await server.StopAsync();
 
-// 第六组：WinForms 控件必须在 STA 线程创建，因此单独启动一个 STA 测试线程。
+// 第七组：WinForms 控件必须在 STA 线程创建，因此单独启动一个 STA 测试线程。
 Exception? designerException = null;
 var designerThread = new Thread(() =>
 {
     try
     {
         // 不显示窗口，只构造窗体并递归查找控件，验证设计器默认值和事件联动。
-        using var form = new MainForm();
+        using var form = new MainForm(new UserPreferences());
         AssertDesignerFieldsAttached(form);
         var host = FindControl<TextBox>(form, "txtHost");
         var port = FindControl<NumericUpDown>(form, "numPort");
@@ -221,14 +318,20 @@ var designerThread = new Thread(() =>
             projectionForm, "numProjectionIntervalSeconds");
         var timedProjection = FindControl<Button>(projectionForm, "btnTimedProjection");
         var projectSelected = FindControl<Button>(projectionForm, "btnProjectSelected");
+        var dataSource = FindControl<TextBox>(projectionForm, "txtDataSourceDirectory");
+        var dataOutput = FindControl<TextBox>(projectionForm, "txtOutputDirectory");
+        var crosstalkButton = FindControl<Button>(projectionForm, "btnCrosstalkTest");
         Assert(topology.SelectedIndex == 4 && topology.Text == "扩展屏幕" &&
                imageTransform.Items.Count == 5 && imageTransform.SelectedIndex == 0 &&
                imageTransform.Text == "原图" && applyImageTransform.Text == "应用图片效果" &&
                closeSecondScreen.Checked &&
                closeSecondScreen.Text == "停止定时投图时关闭第二屏" &&
                projectionInterval.Value == 5 && timedProjection.Text == "开始定时投图" &&
-               projectSelected.Text == "投放选中图片",
-            "投影窗口缺少扩展屏幕、图片翻转、切图间隔、定时投图或选中图片投放设置");
+               projectSelected.Text == "投放选中图片" &&
+               dataSource.Text == @"D:\Program Files\GYTech\Setup_MRTest\ExportFile" &&
+               !string.IsNullOrWhiteSpace(dataOutput.Text) &&
+               crosstalkButton.Text == "串扰测试",
+            "投影窗口缺少扩展屏幕、图片翻转、切图间隔、数据目录或串扰测试设置");
 
         // 默认原图不会锁定，用户之后仍可选择横向翻转和上下翻转。
         imageTransform.SelectedIndex = 2;
@@ -279,7 +382,7 @@ designerThread.Start();
 designerThread.Join();
 if (designerException is not null) throw designerException;
 
-Console.WriteLine("SimpleProtocolServer smoke tests passed: protocol + response confirmation + cycle + TCP + second-screen projection UI.");
+Console.WriteLine("SimpleProtocolServer smoke tests passed: protocol + response confirmation + cycle + TCP + projection + MATLAB-equivalent data processing + settings UI.");
 
 // 最小断言工具：条件不成立就终止测试并说明原因。
 static void Assert(bool condition, string message)

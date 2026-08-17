@@ -55,13 +55,22 @@ partial class ProjectionForm
         btnRefreshImages = new Button();
         btnProjectNext = new Button();
         btnProjectSelected = new Button();
+        grpData = new GroupBox();
+        lblDataProcessingState = new Label();
+        btnBrowseOutputDirectory = new Button();
+        txtOutputDirectory = new TextBox();
+        lblOutputDirectory = new Label();
+        btnBrowseDataSourceDirectory = new Button();
+        txtDataSourceDirectory = new TextBox();
+        lblDataSourceDirectory = new Label();
         btnClose = new Button();
         projectionTimer = new System.Windows.Forms.Timer(components);
-        button1 = new Button();
+        btnCrosstalkTest = new Button();
         grpSettings.SuspendLayout();
         ((System.ComponentModel.ISupportInitialize)numProjectionIntervalSeconds).BeginInit();
         grpImages.SuspendLayout();
         ((System.ComponentModel.ISupportInitialize)picPreview).BeginInit();
+        grpData.SuspendLayout();
         SuspendLayout();
         // 
         // grpSettings
@@ -305,7 +314,7 @@ partial class ProjectionForm
         // btnRefreshImages
         // 
         btnRefreshImages.BackColor = Color.WhiteSmoke;
-        btnRefreshImages.Location = new Point(15, 630);
+        btnRefreshImages.Location = new Point(15, 780);
         btnRefreshImages.Name = "btnRefreshImages";
         btnRefreshImages.Size = new Size(193, 40);
         btnRefreshImages.TabIndex = 2;
@@ -316,7 +325,7 @@ partial class ProjectionForm
         // btnProjectNext
         // 
         btnProjectNext.BackColor = Color.FromArgb(228, 240, 252);
-        btnProjectNext.Location = new Point(240, 630);
+        btnProjectNext.Location = new Point(240, 780);
         btnProjectNext.Name = "btnProjectNext";
         btnProjectNext.Size = new Size(150, 40);
         btnProjectNext.TabIndex = 3;
@@ -334,11 +343,92 @@ partial class ProjectionForm
         btnProjectSelected.Text = "投放选中图片";
         btnProjectSelected.UseVisualStyleBackColor = false;
         btnProjectSelected.Click += btnProjectSelected_Click;
+        //
+        // grpData
+        //
+        grpData.Controls.Add(lblDataProcessingState);
+        grpData.Controls.Add(btnBrowseOutputDirectory);
+        grpData.Controls.Add(txtOutputDirectory);
+        grpData.Controls.Add(lblOutputDirectory);
+        grpData.Controls.Add(btnBrowseDataSourceDirectory);
+        grpData.Controls.Add(txtDataSourceDirectory);
+        grpData.Controls.Add(lblDataSourceDirectory);
+        grpData.Location = new Point(12, 620);
+        grpData.Name = "grpData";
+        grpData.Size = new Size(1066, 145);
+        grpData.TabIndex = 2;
+        grpData.TabStop = false;
+        grpData.Text = "串扰数据（测试完成后自动处理）";
+        //
+        // lblDataProcessingState
+        //
+        lblDataProcessingState.AutoEllipsis = true;
+        lblDataProcessingState.ForeColor = Color.DimGray;
+        lblDataProcessingState.Location = new Point(18, 108);
+        lblDataProcessingState.Name = "lblDataProcessingState";
+        lblDataProcessingState.Size = new Size(1029, 26);
+        lblDataProcessingState.TabIndex = 6;
+        lblDataProcessingState.Text = "按本次测试开始时间和图片数量匹配一级导出文件夹；最后一份数据作为本底。";
+        //
+        // btnBrowseOutputDirectory
+        //
+        btnBrowseOutputDirectory.BackColor = Color.WhiteSmoke;
+        btnBrowseOutputDirectory.Location = new Point(912, 69);
+        btnBrowseOutputDirectory.Name = "btnBrowseOutputDirectory";
+        btnBrowseOutputDirectory.Size = new Size(135, 33);
+        btnBrowseOutputDirectory.TabIndex = 5;
+        btnBrowseOutputDirectory.Text = "选择输出...";
+        btnBrowseOutputDirectory.UseVisualStyleBackColor = false;
+        btnBrowseOutputDirectory.Click += btnBrowseOutputDirectory_Click;
+        //
+        // txtOutputDirectory
+        //
+        txtOutputDirectory.Location = new Point(142, 71);
+        txtOutputDirectory.Name = "txtOutputDirectory";
+        txtOutputDirectory.Size = new Size(760, 30);
+        txtOutputDirectory.TabIndex = 4;
+        //
+        // lblOutputDirectory
+        //
+        lblOutputDirectory.AutoSize = true;
+        lblOutputDirectory.Location = new Point(18, 74);
+        lblOutputDirectory.Name = "lblOutputDirectory";
+        lblOutputDirectory.Size = new Size(118, 24);
+        lblOutputDirectory.TabIndex = 3;
+        lblOutputDirectory.Text = "结果输出目录：";
+        //
+        // btnBrowseDataSourceDirectory
+        //
+        btnBrowseDataSourceDirectory.BackColor = Color.WhiteSmoke;
+        btnBrowseDataSourceDirectory.Location = new Point(912, 27);
+        btnBrowseDataSourceDirectory.Name = "btnBrowseDataSourceDirectory";
+        btnBrowseDataSourceDirectory.Size = new Size(135, 33);
+        btnBrowseDataSourceDirectory.TabIndex = 2;
+        btnBrowseDataSourceDirectory.Text = "选择数据...";
+        btnBrowseDataSourceDirectory.UseVisualStyleBackColor = false;
+        btnBrowseDataSourceDirectory.Click += btnBrowseDataSourceDirectory_Click;
+        //
+        // txtDataSourceDirectory
+        //
+        txtDataSourceDirectory.Location = new Point(142, 29);
+        txtDataSourceDirectory.Name = "txtDataSourceDirectory";
+        txtDataSourceDirectory.Size = new Size(760, 30);
+        txtDataSourceDirectory.TabIndex = 1;
+        txtDataSourceDirectory.Text = "D:\\Program Files\\GYTech\\Setup_MRTest\\ExportFile";
+        //
+        // lblDataSourceDirectory
+        //
+        lblDataSourceDirectory.AutoSize = true;
+        lblDataSourceDirectory.Location = new Point(18, 32);
+        lblDataSourceDirectory.Name = "lblDataSourceDirectory";
+        lblDataSourceDirectory.Size = new Size(118, 24);
+        lblDataSourceDirectory.TabIndex = 0;
+        lblDataSourceDirectory.Text = "原始数据目录：";
         // 
         // btnClose
         // 
         btnClose.BackColor = Color.WhiteSmoke;
-        btnClose.Location = new Point(945, 631);
+        btnClose.Location = new Point(945, 780);
         btnClose.Name = "btnClose";
         btnClose.Size = new Size(110, 40);
         btnClose.TabIndex = 6;
@@ -351,23 +441,24 @@ partial class ProjectionForm
         projectionTimer.Interval = 5000;
         projectionTimer.Tick += projectionTimer_Tick;
         // 
-        // button1
+        // btnCrosstalkTest
         // 
-        button1.Location = new Point(774, 631);
-        button1.Name = "button1";
-        button1.Size = new Size(137, 42);
-        button1.TabIndex = 7;
-        button1.Text = "串扰测试";
-        button1.UseVisualStyleBackColor = true;
-        button1.Click += button1_Click;
+        btnCrosstalkTest.Location = new Point(774, 780);
+        btnCrosstalkTest.Name = "btnCrosstalkTest";
+        btnCrosstalkTest.Size = new Size(137, 42);
+        btnCrosstalkTest.TabIndex = 7;
+        btnCrosstalkTest.Text = "串扰测试";
+        btnCrosstalkTest.UseVisualStyleBackColor = true;
+        btnCrosstalkTest.Click += btnCrosstalkTest_Click;
         // 
         // ProjectionForm
         // 
         AutoScaleMode = AutoScaleMode.None;
         BackColor = Color.FromArgb(232, 242, 247);
-        ClientSize = new Size(1096, 682);
-        Controls.Add(button1);
+        ClientSize = new Size(1096, 835);
+        Controls.Add(btnCrosstalkTest);
         Controls.Add(btnClose);
+        Controls.Add(grpData);
         Controls.Add(btnProjectNext);
         Controls.Add(btnRefreshImages);
         Controls.Add(grpImages);
@@ -377,7 +468,7 @@ partial class ProjectionForm
         MaximizeBox = false;
         Name = "ProjectionForm";
         StartPosition = FormStartPosition.CenterScreen;
-        Text = "扩展投影切图 / 定时投图";
+        Text = "扩展投影切图 / 串扰数据处理 - v1.0.260817";
         FormClosing += ProjectionForm_FormClosing;
         Load += ProjectionForm_Load;
         grpSettings.ResumeLayout(false);
@@ -386,6 +477,8 @@ partial class ProjectionForm
         grpImages.ResumeLayout(false);
         grpImages.PerformLayout();
         ((System.ComponentModel.ISupportInitialize)picPreview).EndInit();
+        grpData.ResumeLayout(false);
+        grpData.PerformLayout();
         ResumeLayout(false);
     }
 
@@ -416,9 +509,17 @@ partial class ProjectionForm
     private Button btnRefreshImages;
     private Button btnProjectNext;
     private Button btnProjectSelected;
+    private GroupBox grpData;
+    private Label lblDataProcessingState;
+    private Button btnBrowseOutputDirectory;
+    private TextBox txtOutputDirectory;
+    private Label lblOutputDirectory;
+    private Button btnBrowseDataSourceDirectory;
+    private TextBox txtDataSourceDirectory;
+    private Label lblDataSourceDirectory;
     private Button btnTimedProjection;
     private Label lblProjectionState;
     private Button btnClose;
     private System.Windows.Forms.Timer projectionTimer;
-    private Button button1;
+    private Button btnCrosstalkTest;
 }
