@@ -29,6 +29,9 @@ partial class ProjectionForm
     {
         components = new System.ComponentModel.Container();
         grpSettings = new GroupBox();
+        btnApplyImageTransform = new Button();
+        cmbImageTransform = new ComboBox();
+        lblImageTransform = new Label();
         chkRestoreWallpaper = new CheckBox();
         lblProjectionState = new Label();
         numProjectionIntervalSeconds = new NumericUpDown();
@@ -62,6 +65,9 @@ partial class ProjectionForm
         // 
         // grpSettings
         // 
+        grpSettings.Controls.Add(btnApplyImageTransform);
+        grpSettings.Controls.Add(cmbImageTransform);
+        grpSettings.Controls.Add(lblImageTransform);
         grpSettings.Controls.Add(btnProjectSelected);
         grpSettings.Controls.Add(chkRestoreWallpaper);
         grpSettings.Controls.Add(lblProjectionState);
@@ -76,10 +82,41 @@ partial class ProjectionForm
         grpSettings.Controls.Add(lblImageDirectory);
         grpSettings.Location = new Point(12, 12);
         grpSettings.Name = "grpSettings";
-        grpSettings.Size = new Size(1066, 112);
+        grpSettings.Size = new Size(1066, 151);
         grpSettings.TabIndex = 0;
         grpSettings.TabStop = false;
         grpSettings.Text = "投影设置";
+        //
+        // btnApplyImageTransform
+        //
+        btnApplyImageTransform.BackColor = Color.WhiteSmoke;
+        btnApplyImageTransform.Location = new Point(315, 106);
+        btnApplyImageTransform.Name = "btnApplyImageTransform";
+        btnApplyImageTransform.Size = new Size(153, 33);
+        btnApplyImageTransform.TabIndex = 11;
+        btnApplyImageTransform.Text = "应用图片效果";
+        btnApplyImageTransform.UseVisualStyleBackColor = false;
+        btnApplyImageTransform.Click += btnApplyImageTransform_Click;
+        //
+        // cmbImageTransform
+        //
+        cmbImageTransform.DropDownStyle = ComboBoxStyle.DropDownList;
+        cmbImageTransform.FormattingEnabled = true;
+        cmbImageTransform.Items.AddRange(new object[] { "原图", "横向显示", "横向翻转（左右镜像）", "上下翻转（垂直镜像）", "左右及上下翻转" });
+        cmbImageTransform.Location = new Point(112, 108);
+        cmbImageTransform.Name = "cmbImageTransform";
+        cmbImageTransform.Size = new Size(195, 32);
+        cmbImageTransform.TabIndex = 10;
+        cmbImageTransform.SelectedIndexChanged += cmbImageTransform_SelectedIndexChanged;
+        //
+        // lblImageTransform
+        //
+        lblImageTransform.AutoSize = true;
+        lblImageTransform.Location = new Point(18, 112);
+        lblImageTransform.Name = "lblImageTransform";
+        lblImageTransform.Size = new Size(100, 24);
+        lblImageTransform.TabIndex = 9;
+        lblImageTransform.Text = "图片效果：";
         // 
         // chkRestoreWallpaper
         // 
@@ -196,7 +233,7 @@ partial class ProjectionForm
         grpImages.Controls.Add(lblCurrentImage);
         grpImages.Controls.Add(picPreview);
         grpImages.Controls.Add(lvImages);
-        grpImages.Location = new Point(12, 132);
+        grpImages.Location = new Point(12, 171);
         grpImages.Name = "grpImages";
         grpImages.Size = new Size(1066, 441);
         grpImages.TabIndex = 1;
@@ -267,7 +304,7 @@ partial class ProjectionForm
         // btnRefreshImages
         // 
         btnRefreshImages.BackColor = Color.WhiteSmoke;
-        btnRefreshImages.Location = new Point(15, 591);
+        btnRefreshImages.Location = new Point(15, 630);
         btnRefreshImages.Name = "btnRefreshImages";
         btnRefreshImages.Size = new Size(193, 40);
         btnRefreshImages.TabIndex = 2;
@@ -278,7 +315,7 @@ partial class ProjectionForm
         // btnProjectNext
         // 
         btnProjectNext.BackColor = Color.FromArgb(228, 240, 252);
-        btnProjectNext.Location = new Point(240, 591);
+        btnProjectNext.Location = new Point(240, 630);
         btnProjectNext.Name = "btnProjectNext";
         btnProjectNext.Size = new Size(150, 40);
         btnProjectNext.TabIndex = 3;
@@ -300,7 +337,7 @@ partial class ProjectionForm
         // btnClose
         // 
         btnClose.BackColor = Color.WhiteSmoke;
-        btnClose.Location = new Point(945, 592);
+        btnClose.Location = new Point(945, 631);
         btnClose.Name = "btnClose";
         btnClose.Size = new Size(110, 40);
         btnClose.TabIndex = 6;
@@ -315,7 +352,7 @@ partial class ProjectionForm
         // 
         // button1
         // 
-        button1.Location = new Point(774, 592);
+        button1.Location = new Point(774, 631);
         button1.Name = "button1";
         button1.Size = new Size(137, 42);
         button1.TabIndex = 7;
@@ -327,7 +364,7 @@ partial class ProjectionForm
         // 
         AutoScaleMode = AutoScaleMode.None;
         BackColor = Color.FromArgb(232, 242, 247);
-        ClientSize = new Size(1096, 643);
+        ClientSize = new Size(1096, 682);
         Controls.Add(button1);
         Controls.Add(btnClose);
         Controls.Add(btnProjectNext);
@@ -355,6 +392,9 @@ partial class ProjectionForm
 
     // 以下字段是窗体上的控件。逻辑文件使用这些字段更新状态、读取选择并输出日志。
     private GroupBox grpSettings;
+    private Button btnApplyImageTransform;
+    private ComboBox cmbImageTransform;
+    private Label lblImageTransform;
     private CheckBox chkRestoreWallpaper;
     private NumericUpDown numProjectionIntervalSeconds;
     private Label lblProjectionIntervalSeconds;

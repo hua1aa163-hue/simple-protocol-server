@@ -6,6 +6,7 @@ using System.Reflection;
 using System.Text;
 using SimpleProtocolServer;
 using SimpleProtocolServer.Networking;
+using SimpleProtocolServer.Projection;
 using SimpleProtocolServer.Protocol;
 
 // 第一组：八种界面命令都必须生成协议约定的准确字符串。
@@ -57,12 +58,40 @@ Assert(CommandResponseMatcher.Classify("&|Stop|@", "&|Stop|OK|@") ==
 
 // 普通命令和测量命令耗时差异很大，因此使用不同超时时间。
 Assert(CommandResponseMatcher.GetResponseTimeout("&|Stop|@") == TimeSpan.FromSeconds(10) &&
-       CommandResponseMatcher.GetResponseTimeout("&|Meas|A|A|@") == TimeSpan.FromSeconds(120),
+       CommandResponseMatcher.GetResponseTimeout("&|Meas|A|A|@") == TimeSpan.FromSeconds(600),
     "普通命令与测量命令的返回超时时间不正确");
 
 // 从列表中间开始时应绕回开头，但每张图片只能出现一次。
 Assert(ProjectionForm.BuildImageTestOrder(2, 4).SequenceEqual([2, 3, 0, 1]),
     "串扰测试没有从选中图片开始将文件夹图片各测试一次");
+
+// 图片效果处理的是第二屏幕上的图片，不会改变显示器本身的方向。
+using (var portraitImage = new Bitmap(2, 3))
+{
+    ProjectedImageTransformer.Apply(portraitImage, ProjectedImageTransform.Landscape);
+    Assert(portraitImage.Width == 3 && portraitImage.Height == 2,
+        "横向显示没有把竖图旋转为横图");
+}
+
+using (var horizontalImage = new Bitmap(2, 1))
+{
+    horizontalImage.SetPixel(0, 0, Color.Red);
+    horizontalImage.SetPixel(1, 0, Color.Blue);
+    ProjectedImageTransformer.Apply(horizontalImage, ProjectedImageTransform.FlipHorizontal);
+    Assert(horizontalImage.GetPixel(0, 0).ToArgb() == Color.Blue.ToArgb() &&
+           horizontalImage.GetPixel(1, 0).ToArgb() == Color.Red.ToArgb(),
+        "横向翻转没有把图片左右对调");
+}
+
+using (var verticalImage = new Bitmap(1, 2))
+{
+    verticalImage.SetPixel(0, 0, Color.Red);
+    verticalImage.SetPixel(0, 1, Color.Blue);
+    ProjectedImageTransformer.Apply(verticalImage, ProjectedImageTransform.FlipVertical);
+    Assert(verticalImage.GetPixel(0, 0).ToArgb() == Color.Blue.ToArgb() &&
+           verticalImage.GetPixel(0, 1).ToArgb() == Color.Red.ToArgb(),
+        "上下翻转没有把图片上下对调");
+}
 
 // 第四组：循环报文走到末尾后必须重新从第一条开始。
 var cycle = new CycleMessageSequence();
@@ -172,14 +201,26 @@ var designerThread = new Thread(() =>
         using var projectionForm = new ProjectionForm();
         AssertDesignerFieldsAttached(projectionForm);
         var topology = FindControl<ComboBox>(projectionForm, "cmbTopology");
+        var imageTransform = FindControl<ComboBox>(projectionForm, "cmbImageTransform");
+        var applyImageTransform = FindControl<Button>(projectionForm, "btnApplyImageTransform");
         var projectionInterval = FindControl<NumericUpDown>(
             projectionForm, "numProjectionIntervalSeconds");
         var timedProjection = FindControl<Button>(projectionForm, "btnTimedProjection");
         var projectSelected = FindControl<Button>(projectionForm, "btnProjectSelected");
         Assert(topology.SelectedIndex == 4 && topology.Text == "扩展屏幕" &&
+               imageTransform.Items.Count == 5 && imageTransform.SelectedIndex == 0 &&
+               imageTransform.Text == "原图" && applyImageTransform.Text == "应用图片效果" &&
                projectionInterval.Value == 5 && timedProjection.Text == "开始定时投图" &&
                projectSelected.Text == "投放选中图片",
-            "投影窗口缺少扩展屏幕、切图间隔、定时投图或选中图片投放设置");
+            "投影窗口缺少扩展屏幕、图片翻转、切图间隔、定时投图或选中图片投放设置");
+
+        // 默认原图不会锁定，用户之后仍可选择横向翻转和上下翻转。
+        imageTransform.SelectedIndex = 2;
+        Assert(imageTransform.Text == "横向翻转（左右镜像）",
+            "投影窗口无法选择横向翻转");
+        imageTransform.SelectedIndex = 3;
+        Assert(imageTransform.Text == "上下翻转（垂直镜像）",
+            "投影窗口无法选择上下翻转");
     }
     catch (Exception ex)
     {

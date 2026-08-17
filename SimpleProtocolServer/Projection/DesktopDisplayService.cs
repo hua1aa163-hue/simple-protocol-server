@@ -86,7 +86,9 @@ internal sealed class DesktopDisplayService : IDesktopDisplayService
     }
 
     /// <summary>把指定图片设置为 Windows 桌面壁纸。</summary>
-    public void SetWallpaper(string imagePath)
+    public void SetWallpaper(
+        string imagePath,
+        ProjectedImageTransform transform = ProjectedImageTransform.Original)
     {
         string fullPath = Path.GetFullPath(imagePath);
         if (!File.Exists(fullPath))
@@ -95,7 +97,7 @@ internal sealed class DesktopDisplayService : IDesktopDisplayService
         }
 
         // Windows 对 PNG/JPEG 壁纸的兼容性受系统设置影响，先转换为 24 位 BMP。
-        string wallpaperPath = ConvertToBmpIfNeeded(fullPath);
+        string wallpaperPath = PrepareWallpaperImage(fullPath, transform);
         // UpdateIniFile 保存设置；SendWinIniChange 通知桌面立即刷新。
         bool success = SystemParametersInfo(
             SpiSetDesktopWallpaper,
@@ -114,15 +116,26 @@ internal sealed class DesktopDisplayService : IDesktopDisplayService
     /// 相同文件未改变时会复用缓存，避免每次投图都重复转换。
     /// </summary>
     internal static string ConvertToBmpIfNeeded(string imagePath)
+        => PrepareWallpaperImage(imagePath, ProjectedImageTransform.Original);
+
+    /// <summary>
+    /// 根据所选效果处理图片，并生成 Windows 壁纸接口兼容的 24 位 BMP。
+    /// 原图模式下如果输入已经是 BMP，会直接返回原路径。
+    /// </summary>
+    internal static string PrepareWallpaperImage(
+        string imagePath,
+        ProjectedImageTransform transform)
     {
-        if (string.Equals(Path.GetExtension(imagePath), ".bmp", StringComparison.OrdinalIgnoreCase))
+        if (transform == ProjectedImageTransform.Original &&
+            string.Equals(Path.GetExtension(imagePath), ".bmp", StringComparison.OrdinalIgnoreCase))
         {
             return imagePath;
         }
 
         // 路径、大小和修改时间共同生成缓存键；图片变化后会得到新的缓存文件名。
         var sourceInfo = new FileInfo(imagePath);
-        string cacheKey = $"{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}";
+        string cacheKey =
+            $"{sourceInfo.FullName}|{sourceInfo.Length}|{sourceInfo.LastWriteTimeUtc.Ticks}|{transform}";
         string hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(cacheKey)))[..20];
         string cacheDirectory = Path.Combine(
             Path.GetTempPath(), "SimpleProtocolServer", "WallpaperCache");
@@ -136,6 +149,7 @@ internal sealed class DesktopDisplayService : IDesktopDisplayService
         try
         {
             using Image source = Image.FromFile(imagePath);
+            ProjectedImageTransformer.Apply(source, transform);
             using var bitmap = new Bitmap(source.Width, source.Height, PixelFormat.Format24bppRgb);
             using (Graphics graphics = Graphics.FromImage(bitmap))
             {

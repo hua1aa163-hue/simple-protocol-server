@@ -9,6 +9,8 @@ internal interface IDesktopDisplayService
     string? GetCurrentWallpaper();
     /// <summary>切换 Windows 投影模式。</summary>
     void ApplyTopology(DisplayTopology topology);
-    /// <summary>把指定图片设置为桌面壁纸。</summary>
-    void SetWallpaper(string imagePath);
+    /// <summary>按所选图片效果处理后，把指定图片设置为桌面壁纸。</summary>
+    void SetWallpaper(
+        string imagePath,
+        ProjectedImageTransform transform = ProjectedImageTransform.Original);
 }

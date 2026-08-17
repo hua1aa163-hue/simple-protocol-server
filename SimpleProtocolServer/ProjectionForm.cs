@@ -37,6 +37,7 @@ public partial class ProjectionForm : Form
     {
         InitializeComponent();
         if (cmbTopology.Items.Count > 4) cmbTopology.SelectedIndex = 4;
+        if (cmbImageTransform.Items.Count > 0) cmbImageTransform.SelectedIndex = 0;
     }
 
     /// <summary>
@@ -132,14 +133,15 @@ public partial class ProjectionForm : Form
         {
             // 只在第一次投图时保存原壁纸，后续切图不会覆盖这个备份。
             CaptureOriginalWallpaper();
-            _desktopDisplay.SetWallpaper(imagePath);
 
-            // 每次投图都重新应用所选拓扑，确保外接屏状态符合用户设置。
+            // 每次投图都重新应用所选拓扑和图片效果，确保第二屏显示符合用户设置。
             DisplayTopology topology = GetSelectedTopology();
             if (topology != DisplayTopology.None)
             {
                 _desktopDisplay.ApplyTopology(topology);
             }
+            ProjectedImageTransform transform = GetSelectedImageTransform();
+            _desktopDisplay.SetWallpaper(imagePath, transform);
 
             ShowPreview(imagePath);
             _currentImageIndex = imageIndex;
@@ -149,7 +151,8 @@ public partial class ProjectionForm : Form
             item.EnsureVisible();
             lblCurrentImage.Text = $"当前图片：{Path.GetFileName(imagePath)}";
             lblProjectionState.Text = $"已投 {imageIndex + 1}/{_imageFiles.Count}";
-            AppendLog($"投图成功：{Path.GetFileName(imagePath)}（{cmbTopology.Text}）");
+            AppendLog(
+                $"投图成功：{Path.GetFileName(imagePath)}（{cmbTopology.Text}，{cmbImageTransform.Text}）");
             return true;
         }
         catch (Exception ex)
@@ -225,6 +228,8 @@ public partial class ProjectionForm : Form
         btnBrowseDirectory.Enabled = settingsEnabled;
         cmbTopology.Enabled = settingsEnabled;
         btnApplyTopology.Enabled = settingsEnabled;
+        cmbImageTransform.Enabled = settingsEnabled;
+        btnApplyImageTransform.Enabled = settingsEnabled;
         numProjectionIntervalSeconds.Enabled = settingsEnabled;
         chkRestoreWallpaper.Enabled = settingsEnabled;
         btnTimedProjection.Enabled = !_isCrosstalkRunning;
@@ -260,6 +265,22 @@ public partial class ProjectionForm : Form
         }
     }
 
+    /// <summary>立即按所选图片效果重新投放当前图片或列表中选中的图片。</summary>
+    private void btnApplyImageTransform_Click(object? sender, EventArgs e)
+    {
+        int imageIndex = lvImages.SelectedIndices.Count == 1
+            ? lvImages.SelectedIndices[0]
+            : _currentImageIndex;
+        if (imageIndex < 0 || imageIndex >= _imageFiles.Count)
+        {
+            MessageBox.Show(this, "请先在图片列表中选择一张图片。", "未选择图片",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        ProjectImageAtIndex(imageIndex, showError: true);
+    }
+
     /// <summary>把下拉框位置转换为 DisplayTopology 枚举。</summary>
     private DisplayTopology GetSelectedTopology() => cmbTopology.SelectedIndex switch
     {
@@ -269,6 +290,30 @@ public partial class ProjectionForm : Form
         4 => DisplayTopology.Extend,
         _ => DisplayTopology.None
     };
+
+    /// <summary>把图片效果下拉框转换为图片变换枚举。</summary>
+    private ProjectedImageTransform GetSelectedImageTransform() =>
+        cmbImageTransform.SelectedIndex switch
+        {
+            1 => ProjectedImageTransform.Landscape,
+            2 => ProjectedImageTransform.FlipHorizontal,
+            3 => ProjectedImageTransform.FlipVertical,
+            4 => ProjectedImageTransform.FlipBoth,
+            _ => ProjectedImageTransform.Original
+        };
+
+    /// <summary>切换图片效果时立即刷新预览，但要点击投图按钮后才改变第二屏图片。</summary>
+    private void cmbImageTransform_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        string? imagePath = lvImages.SelectedItems.Count == 1 &&
+                            lvImages.SelectedItems[0].Tag is string selectedPath
+            ? selectedPath
+            : _currentImageIndex >= 0 && _currentImageIndex < _imageFiles.Count
+                ? _imageFiles[_currentImageIndex]
+                : null;
+
+        if (imagePath is not null) ShowPreview(imagePath);
+    }
 
     /// <summary>
     /// 扫描图片目录、重建列表并重置当前投图位置。
@@ -392,6 +437,7 @@ public partial class ProjectionForm : Form
         try
         {
             using Image source = Image.FromFile(imagePath);
+            ProjectedImageTransformer.Apply(source, GetSelectedImageTransform());
             Size bounds = picPreview.ClientSize;
             // 取宽、高缩放比例中较小者，可以完整显示图片而不裁切。
             double scale = Math.Min(
