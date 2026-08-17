@@ -7,12 +7,11 @@ partial class SecondScreenProjectionForm
 {
     private System.ComponentModel.IContainer components = null;
 
-    /// <summary>释放当前投放图片和设计器组件。</summary>
+    /// <summary>释放像素画布和设计器组件。</summary>
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
-            picProjectedImage?.Image?.Dispose();
             components?.Dispose();
         }
         base.Dispose(disposing);
@@ -20,23 +19,20 @@ partial class SecondScreenProjectionForm
 
     #region Windows Form Designer generated code
 
-    /// <summary>创建第二屏投图 PictureBox，并设置无边框、置顶和黑色背景。</summary>
+    /// <summary>创建第二屏像素画布，并设置无边框、置顶和黑色背景。</summary>
     private void InitializeComponent()
     {
-        picProjectedImage = new PictureBox();
-        ((System.ComponentModel.ISupportInitialize)picProjectedImage).BeginInit();
+        pixelPerfectCanvas = new Projection.PixelPerfectImageControl();
         SuspendLayout();
         //
-        // picProjectedImage
+        // pixelPerfectCanvas
         //
-        picProjectedImage.BackColor = Color.Black;
-        picProjectedImage.Dock = DockStyle.Fill;
-        picProjectedImage.Location = new Point(0, 0);
-        picProjectedImage.Name = "picProjectedImage";
-        picProjectedImage.Size = new Size(800, 450);
-        picProjectedImage.SizeMode = PictureBoxSizeMode.Zoom;
-        picProjectedImage.TabIndex = 0;
-        picProjectedImage.TabStop = false;
+        pixelPerfectCanvas.BackColor = Color.Black;
+        pixelPerfectCanvas.Dock = DockStyle.Fill;
+        pixelPerfectCanvas.Location = new Point(0, 0);
+        pixelPerfectCanvas.Name = "pixelPerfectCanvas";
+        pixelPerfectCanvas.Size = new Size(800, 450);
+        pixelPerfectCanvas.TabIndex = 0;
         //
         // SecondScreenProjectionForm
         //
@@ -44,7 +40,7 @@ partial class SecondScreenProjectionForm
         BackColor = Color.Black;
         ClientSize = new Size(800, 450);
         ControlBox = false;
-        Controls.Add(picProjectedImage);
+        Controls.Add(pixelPerfectCanvas);
         FormBorderStyle = FormBorderStyle.None;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -54,11 +50,10 @@ partial class SecondScreenProjectionForm
         StartPosition = FormStartPosition.Manual;
         Text = "第二屏全屏投图";
         TopMost = true;
-        ((System.ComponentModel.ISupportInitialize)picProjectedImage).EndInit();
         ResumeLayout(false);
     }
 
     #endregion
 
-    private PictureBox picProjectedImage;
+    private Projection.PixelPerfectImageControl pixelPerfectCanvas;
 }

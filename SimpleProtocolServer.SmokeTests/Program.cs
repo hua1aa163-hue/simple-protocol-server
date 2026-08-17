@@ -98,6 +98,13 @@ Assert(SecondScreenProjectionForm.FindSecondScreenIndex([true, false, false]) ==
        SecondScreenProjectionForm.FindSecondScreenIndex([true]) == -1,
     "第二屏选择规则没有优先使用非主屏或没有正确拒绝单屏环境");
 
+// 1:1 模式只计算整数像素落点：小图居中留黑边，大图居中后以负坐标裁切。
+Assert(PixelPerfectImageControl.CalculateImageLocation(
+           new Size(1920, 1080), new Size(640, 480)) == new Point(640, 300) &&
+       PixelPerfectImageControl.CalculateImageLocation(
+           new Size(1920, 1080), new Size(3840, 2160)) == new Point(-960, -540),
+    "像素对像素投图的居中或裁切坐标不正确");
+
 // 第四组：循环报文走到末尾后必须重新从第一条开始。
 var cycle = new CycleMessageSequence();
 cycle.Reset(["&|Stop|@", "&|FF|7500|@"]);
@@ -233,13 +240,34 @@ var designerThread = new Thread(() =>
 
         using var secondScreenForm = new SecondScreenProjectionForm();
         AssertDesignerFieldsAttached(secondScreenForm);
-        var projectedImage = FindControl<PictureBox>(
-            secondScreenForm, "picProjectedImage");
+        var pixelCanvas = FindControl<PixelPerfectImageControl>(
+            secondScreenForm, "pixelPerfectCanvas");
         Assert(secondScreenForm.FormBorderStyle == FormBorderStyle.None &&
                secondScreenForm.TopMost && !secondScreenForm.ShowInTaskbar &&
-               projectedImage.Dock == DockStyle.Fill &&
-               projectedImage.SizeMode == PictureBoxSizeMode.Zoom,
-            "第二屏投图窗口不是无边框置顶全屏图片窗口");
+               secondScreenForm.AutoScaleMode == AutoScaleMode.None &&
+               pixelCanvas.Dock == DockStyle.Fill &&
+               pixelCanvas.BackColor == Color.Black,
+            "第二屏投图窗口不是无边框置顶的像素对像素画布");
+
+        // 把 2×2 原图画到 4×4 画布，四个源像素必须原样出现在中央 2×2，周围保持黑色。
+        var sourcePixels = new Bitmap(2, 2);
+        sourcePixels.SetPixel(0, 0, Color.Red);
+        sourcePixels.SetPixel(1, 0, Color.Green);
+        sourcePixels.SetPixel(0, 1, Color.Blue);
+        sourcePixels.SetPixel(1, 1, Color.White);
+        pixelCanvas.Size = new Size(4, 4);
+        pixelCanvas.ReplaceImage(sourcePixels);
+        using var renderedPixels = new Bitmap(4, 4);
+        using (Graphics renderedGraphics = Graphics.FromImage(renderedPixels))
+        {
+            pixelCanvas.RenderPixelPerfect(renderedGraphics, renderedPixels.Size);
+        }
+        Assert(renderedPixels.GetPixel(0, 0).ToArgb() == Color.Black.ToArgb() &&
+               renderedPixels.GetPixel(1, 1).ToArgb() == Color.Red.ToArgb() &&
+               renderedPixels.GetPixel(2, 1).ToArgb() == Color.Green.ToArgb() &&
+               renderedPixels.GetPixel(1, 2).ToArgb() == Color.Blue.ToArgb() &&
+               renderedPixels.GetPixel(2, 2).ToArgb() == Color.White.ToArgb(),
+            "第二屏画布没有按一个源像素对应一个屏幕像素绘制");
     }
     catch (Exception ex)
     {

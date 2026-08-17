@@ -32,6 +32,7 @@
 - 投影窗口默认选择“扩展屏幕”。
 - 第二屏图片效果默认选择“原图”，后续可选择横向显示、横向翻转、上下翻转或组合翻转。
 - 投图只使用非主屏；没有第二屏时明确提示，不允许全屏覆盖主控制屏。
+- 第二屏必须严格按 1:1 像素显示，禁止缩放和插值。
 - 行间隔默认 1 秒；循环间隔默认 1 分钟；投图间隔默认 5 秒。
 
 ## 3. 标准命令协议
@@ -123,7 +124,9 @@
 - “横向显示”只在源图为竖图时顺时针旋转 90°；源图已经是横图时保持不变。
 - 图片效果只处理投放图片，不调用 Windows 显示方向接口，也不旋转第二块显示器。
 - 预览、手动投图、定时投图、投放选中图片和串扰测试均使用当前选择的图片效果。
-- 实际投图通过 `SecondScreenProjectionForm` 完成：无边框、置顶、黑色背景、PictureBox 使用 Zoom 完整显示。
+- 实际投图通过 `SecondScreenProjectionForm` 和 `PixelPerfectImageControl` 完成：无边框、置顶、黑色背景。
+- 使用 Per-Monitor-V2 DPI 感知和 `Graphics.DrawImageUnscaled`，一个源图片像素对应一个第二屏物理像素。
+- 小图在黑底中央原尺寸显示；大图从中央裁切超出屏幕的部分，禁止为了完整显示而压缩。
 - 投图窗口只铺满第一个非主屏，不修改 Windows 桌面壁纸，不显示在任务栏。
 - 没有非主屏时投图失败并提示连接/启用扩展屏幕，不能回退覆盖主屏。
 - 第二屏窗体必须使用 `Show()` 打开，不设置 `Owner`，不使用 `ShowDialog()`，从而保证控制界面仍可点击。
@@ -144,6 +147,7 @@
 | 投影抽象 | `Projection/IDesktopDisplayService.cs` | 隔离窗体与 Windows API | `DisplayTopology` |
 | 投影模式 | `Projection/DisplayTopology.cs` | 表示屏幕拓扑 | 无 |
 | 图片效果 | `Projection/ProjectedImageTransform.cs` | 处理横向、左右镜像、上下镜像和组合翻转 | `System.Drawing` |
+| 像素画布 | `Projection/PixelPerfectImageControl.cs` | 原尺寸居中绘制及大图裁切，禁止缩放 | `System.Drawing` |
 | Windows 实现 | `Projection/DesktopDisplayService.cs` | 切换 Windows 投影拓扑 | Windows API |
 | 主窗体 | `MainForm.cs/.Designer.cs/.resx` | TCP、协议、循环发送协调 | 上述协议与网络模块 |
 | 投影窗体 | `ProjectionForm.cs/.Designer.cs/.resx` | 图片列表、投图和串扰循环 | 投影服务与发送委托 |
@@ -160,7 +164,7 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 
 ## 9. 迁移到其他 WinForms 项目的步骤
 
-1. 目标项目使用 `net8.0-windows`，并启用 `<UseWindowsForms>true</UseWindowsForms>`。
+1. 目标项目使用 `net8.0-windows`，启用 `<UseWindowsForms>true</UseWindowsForms>` 和 `<ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>`。
 2. 先复制 `Protocol` 和 `Networking` 模块，修改命名空间并运行协议/TCP 测试。
 3. 需要投影功能时，再复制 `Projection` 模块及投影窗体三件套：`.cs`、`.Designer.cs`、`.resx`。
 4. 在主窗体创建并订阅 `TcpMessageServer`，启动时监听 `IPAddress.Loopback` 和端口 `9527`。
@@ -173,14 +177,15 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 6. 命令选择事件统一调用 `SimpleMessageProtocol`，同步参数标签、是否可编辑、默认参数、预期返回和报文预览。
 7. 使用 `ProjectionForm(SendCurrentMessageAndWaitForCompletionAsync)` 传入串扰测试发送委托。
 8. 在投影控制窗体中提供原图、横向显示、横向翻转、上下翻转和组合翻转。
-9. 创建 `SecondScreenProjectionForm`：选择第一个非主屏，设置无边框、置顶、黑底、Zoom，并在内存中应用图片效果。
-10. 使用非模态 `_projectionForm.Show()` 打开控制窗体；第二屏窗体同样使用无 Owner 的 `Show()`。
-11. 把所有控件放在 `.Designer.cs` 中；业务 `.cs` 只编写事件和逻辑。
-12. 在项目文件中为三个窗体保存 `SubType`、`DependentUpon` 和资源归属关系，确保 Visual Studio Designer 能识别。
+9. 创建 `SecondScreenProjectionForm`：选择第一个非主屏，设置无边框、置顶、黑底，并在内存中应用图片效果。
+10. 使用 `PixelPerfectImageControl` 和 `DrawImageUnscaled` 进行 1:1 像素绘制；小图居中留黑边，大图居中裁切，不允许缩放。
+11. 使用非模态 `_projectionForm.Show()` 打开控制窗体；第二屏窗体同样使用无 Owner 的 `Show()`。
+12. 把所有控件放在 `.Designer.cs` 中；业务 `.cs` 只编写事件和逻辑。
+13. 在项目文件中为三个窗体保存 `SubType`、`DependentUpon` 和资源归属关系，确保 Visual Studio Designer 能识别。
 
 ## 10. 设计器约束
 
-- `MainForm` 和 `ProjectionForm` 的控件必须声明在各自 `.Designer.cs` 中。
+- `MainForm`、`ProjectionForm` 和 `SecondScreenProjectionForm` 的控件必须声明在各自 `.Designer.cs` 中。
 - 每个控件都要有稳定且可读的 `Name`，并挂载到窗体或容器控件树。
 - `System.Windows.Forms.Timer` 应放入 `components` 容器。
 - 不要在业务代码中运行时创建固定按钮、标签、输入框或列表，否则无法在设计器中调节。
@@ -203,6 +208,8 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 - [ ] 图片翻转只改变投放图片，不旋转第二块显示器本身。
 - [ ] 第二屏图片通过无边框置顶窗口显示，不改变 Windows 桌面壁纸。
 - [ ] 全屏窗口只选择非主屏；单屏环境明确拒绝投图，不覆盖主界面。
+- [ ] 2×2 测试图投到 4×4 画布时仍只占中央 2×2，颜色逐像素一致，周围为黑色。
+- [ ] 大于第二屏分辨率的图片只裁切超出部分，不缩放到屏幕尺寸。
 - [ ] 单击图片列表后可以投放选中图片。
 - [ ] 串扰测试收到 Run 后继续等待，收到最终 OK 后才进入下一张。
 - [ ] OK 后严格等待 1 秒再投放下一张。
@@ -232,10 +239,11 @@ dotnet run --project .\SimpleProtocolServer.SmokeTests\SimpleProtocolServer.Smok
 5. 发送失败、NG、断线、超时或投图失败时立即停止，不继续投图。
 6. 投影控制窗口必须非模态且不设置 Owner，保证主界面可操作。
 7. 必须使用非主屏上的无边框置顶全屏窗口投图，不得修改 Windows 桌面壁纸；没有第二屏时拒绝投图。
-8. 必须提供原图、横向显示、横向翻转、上下翻转和组合翻转；效果作用于第二屏图片，不改变显示器方向。
-9. 所有固定控件必须可在 WinForms Designer 中编辑。
-10. 为新手添加中文注释，并补充与修改内容相称的自动测试。
-11. 完成后执行 Release 编译和冒烟测试，报告实际结果。
+8. 第二屏必须使用 `DrawImageUnscaled` 严格按 1:1 像素绘制；禁止 Zoom 和插值，小图居中，大图裁切。
+9. 必须提供原图、横向显示、横向翻转、上下翻转和组合翻转；效果作用于第二屏图片，不改变显示器方向。
+10. 所有固定控件必须可在 WinForms Designer 中编辑。
+11. 为新手添加中文注释，并补充与修改内容相称的自动测试。
+12. 完成后执行 Release 编译和冒烟测试，报告实际结果。
 ```
 
 ## 13. 来源项目中的当前实现位置

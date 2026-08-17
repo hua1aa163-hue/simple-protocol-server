@@ -6,7 +6,7 @@ namespace SimpleProtocolServer;
 /// <summary>在外接非主屏上全屏显示一张经过方向/镜像处理的图片。</summary>
 public partial class SecondScreenProjectionForm : Form
 {
-    /// <summary>创建只包含一个全屏 PictureBox 的第二屏投图窗口。</summary>
+    /// <summary>创建只包含一个像素对像素画布的第二屏投图窗口。</summary>
     public SecondScreenProjectionForm()
     {
         InitializeComponent();
@@ -44,9 +44,11 @@ public partial class SecondScreenProjectionForm : Form
                 "未检测到第二屏幕。请先连接显示器，并在 Windows 中启用扩展屏幕。");
         }
 
-        // 先复制图片，再关闭源文件；后续切图或删除文件不会被 Image.FromFile 锁住。
-        Image projectedImage;
-        using (Image source = Image.FromFile(fullPath))
+        // 启用嵌入色彩配置读取，再复制原始像素并关闭源文件，避免锁住图片。
+        Image? projectedImage;
+        using (Image source = Image.FromFile(
+                   fullPath,
+                   useEmbeddedColorManagement: true))
         {
             projectedImage = new Bitmap(source);
         }
@@ -56,10 +58,8 @@ public partial class SecondScreenProjectionForm : Form
             ProjectedImageTransformer.Apply(projectedImage, transform);
             MoveToScreen(screens[targetIndex]);
 
-            Image? oldImage = picProjectedImage.Image;
-            picProjectedImage.Image = projectedImage;
-            projectedImage = null!; // 所有权已交给 PictureBox，关闭或下次切图时释放。
-            oldImage?.Dispose();
+            pixelPerfectCanvas.ReplaceImage(projectedImage);
+            projectedImage = null; // 所有权已交给画布，关闭或下次切图时释放。
 
             if (!Visible)
             {
@@ -71,7 +71,7 @@ public partial class SecondScreenProjectionForm : Form
         }
         finally
         {
-            // 只有在变换或显示过程中发生异常、尚未交给 PictureBox 时才需要这里释放。
+            // 只有在变换或显示过程中发生异常、尚未交给画布时才需要这里释放。
             projectedImage?.Dispose();
         }
     }
