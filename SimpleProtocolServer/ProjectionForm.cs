@@ -13,7 +13,10 @@ public partial class ProjectionForm : Form
 {
     // 只把这些扩展名当作可投放图片，比较时忽略大小写。
     private static readonly HashSet<string> SupportedExtensions =
-        new(StringComparer.OrdinalIgnoreCase) { ".png", ".bmp", ".jpg", ".jpeg" };
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".png", ".bmp", ".jpg", ".jpeg", ".tif", ".tiff"
+        };
 
     // Windows 投影拓扑的具体调用由服务类负责；图片由第二屏窗体显示。
     private readonly IDesktopDisplayService _desktopDisplay = new DesktopDisplayService();
@@ -445,7 +448,7 @@ public partial class ProjectionForm : Form
 
         if (showError && _imageFiles.Count == 0)
         {
-            MessageBox.Show(this, "当前目录没有找到 PNG、BMP、JPG 或 JPEG 图片。",
+            MessageBox.Show(this, "当前目录没有找到 PNG、BMP、JPG、JPEG、TIF 或 TIFF 图片。",
                 "图片数量", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
@@ -507,7 +510,7 @@ public partial class ProjectionForm : Form
     {
         try
         {
-            using Image source = Image.FromFile(imagePath);
+            using Bitmap source = ProjectedImageLoader.LoadBitmapCopy(imagePath);
             ProjectedImageTransformer.Apply(source, GetSelectedImageTransform());
             Size bounds = picPreview.ClientSize;
             // 取宽、高缩放比例中较小者，可以完整显示图片而不裁切。
@@ -715,13 +718,11 @@ public partial class ProjectionForm : Form
             lblProjectionState.Text = $"串扰测试及数据处理完成：{testOrder.Count} 张图片";
             lblDataProcessingState.Text = $"结果：{result.OutputDirectory}";
             AppendLog($"数据处理完成：{result.OutputDirectory}");
-            MessageBox.Show(this,
-                $"文件夹内 {testOrder.Count} 张图片已全部测试并完成数据处理。\r\n\r\n" +
-                $"Max：{result.Calculation.Maximum * 100:0.000}%\r\n" +
-                $"Min：{result.Calculation.Minimum * 100:0.000}%\r\n" +
-                $"Mean：{result.Calculation.Mean * 100:0.000}%\r\n\r\n" +
-                $"结果目录：\r\n{result.OutputDirectory}",
-                "串扰测试完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            // 完成提示直接预览 MATLAB 风格热力图；统计数值仍保存在结果 Excel 的 Sheet2，
+            // 但不再挤在弹窗文字中，用户可以先直观看到整张测试结果图。
+            using var resultForm = new CrosstalkResultForm(result.HeatmapPath);
+            resultForm.ShowDialog(this);
         }
         catch (OperationCanceledException)
         {

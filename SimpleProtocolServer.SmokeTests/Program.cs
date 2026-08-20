@@ -5,6 +5,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.IO.Compression;
+using System.Drawing.Imaging;
 using SimpleProtocolServer;
 using SimpleProtocolServer.DataProcessing;
 using SimpleProtocolServer.Networking;
@@ -134,6 +135,36 @@ string smokeDirectory = Path.Combine(
 Directory.CreateDirectory(smokeDirectory);
 try
 {
+    // 生成两种 TIFF 扩展名的真实文件，验证列表扫描和生产加载器都能正常处理。
+    string tifPath = Path.Combine(smokeDirectory, "projection-sample.tif");
+    string tiffPath = Path.Combine(smokeDirectory, "projection-sample.TIFF");
+    using (var tiffSource = new Bitmap(3, 2, PixelFormat.Format24bppRgb))
+    {
+        tiffSource.SetPixel(0, 0, Color.Red);
+        tiffSource.SetPixel(2, 1, Color.Blue);
+        tiffSource.Save(tifPath, ImageFormat.Tiff);
+        tiffSource.Save(tiffPath, ImageFormat.Tiff);
+    }
+    File.WriteAllText(Path.Combine(smokeDirectory, "not-an-image.txt"), "ignored");
+
+    List<string> discoveredImages = ProjectionForm.FindImageFiles(smokeDirectory);
+    Assert(discoveredImages.Count == 2 &&
+           discoveredImages.Contains(tifPath) &&
+           discoveredImages.Contains(tiffPath),
+        "图片列表没有同时识别 .tif、.tiff，或误收录了非图片文件");
+
+    using (Bitmap loadedTiff = ProjectedImageLoader.LoadBitmapCopy(tiffPath))
+    {
+        Assert(loadedTiff.Size == new Size(3, 2) &&
+               loadedTiff.GetPixel(0, 0).R > 200 &&
+               loadedTiff.GetPixel(2, 1).B > 200,
+            "TIFF 没有按原尺寸和颜色加载到内存");
+
+        // 内存副本存在期间仍应能独占打开源文件，证明投图不会长期锁住 TIFF。
+        using FileStream unlockedTiff = File.Open(
+            tiffPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+    }
+
     var brightnessSheet = new object?[614, 3];
     brightnessSheet[2, 2] = "Lv(cd/m²)";
     for (int row = 3; row < 614; row++) brightnessSheet[row, 2] = row - 2 + 0.25;
@@ -145,7 +176,7 @@ try
            Math.Abs(readBrightness[1] - 1.25) < 0.0000001,
         "XLSX 工具没有正确读取 Brightness 工作表 C 列");
 
-    // 把计算结果写成双工作表 Excel 和 300 DPI PNG，确认文件结构及图片尺寸都完整。
+    // 把计算结果写成双工作表 Excel 和 MATLAB 风格 300 DPI PNG，确认文件结构及图片尺寸都完整。
     string crosstalkPath = Path.Combine(smokeDirectory, "crosstalk.xlsx");
     string heatmapPath = Path.Combine(smokeDirectory, "crosstalk.png");
     CrosstalkDataProcessor.WriteCrosstalkWorkbook(crosstalkPath, calculated);
@@ -158,9 +189,18 @@ try
     }
     using (Image heatmap = Image.FromFile(heatmapPath))
     {
-        Assert(heatmap.Width == 1500 && heatmap.Height == 900 &&
+        Assert(heatmap.Width == CrosstalkDataProcessor.HeatmapImageWidth &&
+               heatmap.Height == CrosstalkDataProcessor.HeatmapImageHeight &&
                Math.Abs(heatmap.HorizontalResolution - 300) < 0.1,
-            "串扰热力图不是 1500×900、300 DPI");
+            "串扰热力图不是 MATLAB 参考图的 3792×2408、300 DPI");
+    }
+    using (var heatmapBitmap = new Bitmap(heatmapPath))
+    {
+        Color nanBorder = heatmapBitmap.GetPixel(100, 100);
+        Color innerCell = heatmapBitmap.GetPixel(232, 228);
+        Assert(nanBorder.ToArgb() == Color.FromArgb(33, 33, 33).ToArgb() &&
+               innerCell.ToArgb() != nanBorder.ToArgb(),
+            "串扰热力图没有使用 MATLAB 风格的深灰 NaN 外圈和彩色内部单元格");
     }
 
     // 设置文件使用临时路径，验证空文本、循环列表和各类选项均能跨启动恢复。
@@ -340,6 +380,30 @@ var designerThread = new Thread(() =>
         imageTransform.SelectedIndex = 3;
         Assert(imageTransform.Text == "上下翻转（垂直镜像）",
             "投影窗口无法选择上下翻转");
+
+        // 完成提示也必须是设计器窗体，并用可缩放图片框显示热力图，而不是统计文字消息框。
+        string popupImagePath = Path.Combine(
+            Path.GetTempPath(), $"crosstalk-popup-{Guid.NewGuid():N}.png");
+        try
+        {
+            using (var popupImage = new Bitmap(2, 2)) popupImage.Save(popupImagePath);
+            using var resultForm = new CrosstalkResultForm(popupImagePath);
+            AssertDesignerFieldsAttached(resultForm);
+            var resultPicture = FindControl<PictureBox>(resultForm, "picHeatmap");
+            var resultClose = FindControl<Button>(resultForm, "btnClose");
+            Assert(resultPicture.Dock == DockStyle.Fill &&
+                   resultPicture.SizeMode == PictureBoxSizeMode.Zoom &&
+                   resultPicture.Image is not null && resultClose.Text == "关闭",
+                "串扰完成窗体没有使用可缩放图片框显示结果图");
+
+            // 构造函数必须释放源 PNG 文件句柄，弹窗打开期间结果文件仍可被复制或归档。
+            using FileStream unlockedImage = File.Open(
+                popupImagePath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+        finally
+        {
+            if (File.Exists(popupImagePath)) File.Delete(popupImagePath);
+        }
 
         using var secondScreenForm = new SecondScreenProjectionForm();
         AssertDesignerFieldsAttached(secondScreenForm);

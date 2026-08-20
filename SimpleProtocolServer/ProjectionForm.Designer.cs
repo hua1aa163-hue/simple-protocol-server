@@ -468,7 +468,7 @@ partial class ProjectionForm
         MaximizeBox = false;
         Name = "ProjectionForm";
         StartPosition = FormStartPosition.CenterScreen;
-        Text = "扩展投影切图 / 串扰数据处理 - v1.0.260817";
+        Text = "扩展投影切图 / 串扰数据处理 - v.1.0.260820";
         FormClosing += ProjectionForm_FormClosing;
         Load += ProjectionForm_Load;
         grpSettings.ResumeLayout(false);

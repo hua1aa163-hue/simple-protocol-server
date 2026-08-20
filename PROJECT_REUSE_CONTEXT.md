@@ -1,10 +1,10 @@
 # 报文定时发送与串扰测试——项目复用上下文
 
-> 版本：v1.0.260817（2026-08-17）
+> 版本：v.1.0.260820（2026-08-20）
 > 来源项目：`SimpleProtocolServer`（.NET 8 Windows Forms）  
 > 用途：把本文件复制到其他项目根目录，交给开发人员或 Codex 阅读，即可了解已确认需求、协议规则、可复用模块和验收标准。
 
-版本说明：Git 标签 `v0.0.1` 保留了早期投图方案；`v1.0.260817` 使用第二屏无边框逐像素投图，并加入串扰原始数据自动匹配、MATLAB 等价处理和界面设置持久化。
+版本说明：Git 标签 `v0.0.1` 保留早期投图方案；`v1.0.260817` 加入第二屏逐像素投图、串扰数据处理和设置持久化；`v.1.0.260820` 进一步加入 MATLAB 风格热力图、完成结果图片弹窗以及 TIF/TIFF 投图支持。
 
 ## 1. 最终目标
 
@@ -23,6 +23,7 @@
 11. 串扰测试全部成功后，按本轮测试时间和次数读取 GYTech 导出的 Excel，执行 MATLAB 等价计算。
 12. 原始导出文件、合并矩阵、串扰结果表和热力图统一归档到用户选择的结果目录。
 13. 所有可编辑文本、列表、数值和下拉/复选选项在正常关闭时保存，下次启动恢复。
+14. 热力图按 MATLAB `heatmap` 参考外观输出；测试完成弹窗直接显示结果图，不再显示 Max、Min、Mean 文字。
 
 ## 2. 已确认且不可误解的默认行为
 
@@ -121,7 +122,7 @@
 
 ## 7. 投影与图片规则
 
-- 支持的图片扩展名：PNG、BMP、JPG、JPEG。
+- 支持的图片扩展名：PNG、BMP、JPG、JPEG、TIF、TIFF；多页 TIFF 显示第一帧。
 - 图片列表单击选中后，“投放选中图片”只投放该行对应图片。
 - 可手动投放下一张，也可按秒进行定时投图。
 - Windows 投影模式包括：保持当前、仅电脑屏幕、复制、仅第二屏幕、扩展屏幕。
@@ -154,6 +155,7 @@
 | 投影抽象 | `Projection/IDesktopDisplayService.cs` | 隔离窗体与 Windows API | `DisplayTopology` |
 | 投影模式 | `Projection/DisplayTopology.cs` | 表示屏幕拓扑 | 无 |
 | 图片效果 | `Projection/ProjectedImageTransform.cs` | 处理横向、左右镜像、上下镜像和组合翻转 | `System.Drawing` |
+| 图片加载 | `Projection/ProjectedImageLoader.cs` | 统一加载常见图片与 TIFF 第一帧，并解除源文件占用 | `System.Drawing` |
 | 像素画布 | `Projection/PixelPerfectImageControl.cs` | 原尺寸居中绘制及大图裁切，禁止缩放 | `System.Drawing` |
 | Windows 实现 | `Projection/DesktopDisplayService.cs` | 切换 Windows 投影拓扑 | Windows API |
 | 主窗体 | `MainForm.cs/.Designer.cs/.resx` | TCP、协议、循环发送协调 | 上述协议与网络模块 |
@@ -161,6 +163,7 @@
 | 第二屏窗体 | `SecondScreenProjectionForm.cs/.Designer.cs` | 非主屏无边框全屏图片显示 | 图片效果模块 |
 | 串扰计算 | `DataProcessing/CrosstalkDataProcessor.cs` | 本批数据定位、MATLAB 等价计算、归档和热力图 | `SimpleXlsx`、`System.Drawing` |
 | XLSX 工具 | `DataProcessing/SimpleXlsx.cs` | 读取 Brightness C 列，写原始矩阵与双工作表结果 | .NET ZIP/XML |
+| 结果预览窗体 | `CrosstalkResultForm.cs/.Designer.cs/.resx` | 测试完成后缩放预览 MATLAB 风格热力图 | `System.Drawing`、WinForms |
 | 用户设置 | `Settings/UserPreferences.cs` | JSON 保存并恢复主界面和投影界面选项 | `System.Text.Json` |
 | 冒烟测试 | `SimpleProtocolServer.SmokeTests/Program.cs` | 协议、网络、循环、界面验证 | 主项目 |
 
@@ -193,9 +196,18 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 12. 把所有控件放在 `.Designer.cs` 中；业务 `.cs` 只编写事件和逻辑。
 13. 在项目文件中为三个窗体保存 `SubType`、`DependentUpon` 和资源归属关系，确保 Visual Studio Designer 能识别。
 
-## 10. 设计器约束
+## 10. 热力图与完成提示
 
-- `MainForm`、`ProjectionForm` 和 `SecondScreenProjectionForm` 的控件必须声明在各自 `.Designer.cs` 中。
+- PNG 固定输出为 `3792×2408`、`300 DPI`，与当前 MATLAB `exportgraphics` 参考图一致。
+- 数据区显示 19 行、32 列坐标刻度，单元格数值为百分数并最多保留三位小数，末尾 0 自动省略。
+- 配色采用 `jet`，色轴固定为 0~3，并按 0.5 显示刻度；超过 3% 的异常值钳制为深红色绘制。
+- 最外圈 NaN 不填色、不画格线，显示深灰坐标背景；右下方显示独立的 NaN 深灰图例。
+- Max、Min、Mean 仍写入结果 Excel 的 Sheet2，但完成弹窗不再列出这些统计文字。
+- 完成弹窗使用 `CrosstalkResultForm` 的 `PictureBoxSizeMode.Zoom` 显示整张 PNG，关闭弹窗不影响主程序。
+
+## 11. 设计器约束
+
+- `MainForm`、`ProjectionForm`、`SecondScreenProjectionForm` 和 `CrosstalkResultForm` 的控件必须声明在各自 `.Designer.cs` 中。
 - 每个控件都要有稳定且可读的 `Name`，并挂载到窗体或容器控件树。
 - `System.Windows.Forms.Timer` 应放入 `components` 容器。
 - 不要在业务代码中运行时创建固定按钮、标签、输入框或列表，否则无法在设计器中调节。
@@ -203,7 +215,7 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 - 不要手写覆盖 `Dispose(bool disposing)`；保留 Designer 的组件释放逻辑。
 - 修改布局后应分别打开三个窗体的 Visual Studio Designer，确认无加载错误。
 
-## 11. 验收清单
+## 12. 验收清单
 
 迁移完成后至少验证以下内容：
 
@@ -225,7 +237,9 @@ Func<CancellationToken, Task<bool>> sendCurrentMessageAndWaitForCompletionAsync
 - [ ] OK 后严格等待 1 秒再投放下一张。
 - [ ] 发送失败、NG、断线、超时或投图失败时不继续投下一张。
 - [ ] 文件夹中所有图片各测试一次后自动结束。
-- [ ] 三个窗体都能在 Visual Studio Designer 中打开并调节所有控件。
+- [ ] 热力图为 3792×2408、300 DPI，具有 MATLAB 风格深灰 NaN 外圈、行列刻度、0~3 色轴和 NaN 图例。
+- [ ] 串扰完成弹窗直接显示热力图，不显示 Max、Min、Mean 统计文字。
+- [ ] 四个窗体都能在 Visual Studio Designer 中打开并调节所有控件。
 
 建议验证命令：
 
@@ -234,7 +248,7 @@ dotnet build .\SimpleProtocolServer.sln -c Release --no-restore -p:UseSharedComp
 dotnet run --project .\SimpleProtocolServer.SmokeTests\SimpleProtocolServer.SmokeTests.csproj -c Release --no-build --no-restore
 ```
 
-## 12. 可直接交给其他项目 Codex 的任务说明
+## 13. 可直接交给其他项目 Codex 的任务说明
 
 复制下面这段文字，并把本文件一并放入目标项目：
 

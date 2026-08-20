@@ -44,14 +44,8 @@ public partial class SecondScreenProjectionForm : Form
                 "未检测到第二屏幕。请先连接显示器，并在 Windows 中启用扩展屏幕。");
         }
 
-        // 启用嵌入色彩配置读取，再复制原始像素并关闭源文件，避免锁住图片。
-        Image? projectedImage;
-        using (Image source = Image.FromFile(
-                   fullPath,
-                   useEmbeddedColorManagement: true))
-        {
-            projectedImage = new Bitmap(source);
-        }
+        // 统一加载器支持 PNG、BMP、JPEG 和 TIFF，并会复制第一帧后立即关闭源文件。
+        Image? projectedImage = ProjectedImageLoader.LoadBitmapCopy(fullPath);
 
         try
         {

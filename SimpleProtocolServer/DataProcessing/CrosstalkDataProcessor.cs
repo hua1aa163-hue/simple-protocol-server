@@ -43,6 +43,10 @@ internal static class CrosstalkDataProcessor
     internal const int ExpectedBrightnessRows = 612;
     internal const int HeatmapRows = 19;
     internal const int HeatmapColumns = 32;
+    // MATLAB exportgraphics 在当前参考环境中输出 3792×2408、300 DPI 的 PNG。
+    // 固定为相同画布后，每个采样格有足够空间显示三位小数，不会再出现数字被截断。
+    internal const int HeatmapImageWidth = 3792;
+    internal const int HeatmapImageHeight = 2408;
     internal const double AbnormalThreshold = 0.03;
 
     private static readonly TimeSpan ExportWaitTimeout = TimeSpan.FromSeconds(60);
@@ -488,78 +492,153 @@ internal static class CrosstalkDataProcessor
         ]);
     }
 
-    /// <summary>生成 1500×900、300 DPI 的 jet 色带热力图；色轴固定为 0% 到 3%。</summary>
+    /// <summary>
+    /// 按 MATLAB heatmap/exportgraphics 的参考外观生成 3792×2408、300 DPI PNG。
+    /// 深灰坐标区、19×32 刻度、无尾随零的三位小数、jet 色带和 NaN 图例均与参考图一致。
+    /// </summary>
     internal static void WriteHeatmap(string path, string folderName, double[,] heatmapValues)
     {
-        using var bitmap = new Bitmap(1500, 900, PixelFormat.Format24bppRgb);
+        if (heatmapValues.GetLength(0) != HeatmapRows ||
+            heatmapValues.GetLength(1) != HeatmapColumns)
+        {
+            throw new ArgumentException(
+                $"热力图数据必须为 {HeatmapRows}×{HeatmapColumns}。", nameof(heatmapValues));
+        }
+
+        using var bitmap = new Bitmap(
+            HeatmapImageWidth, HeatmapImageHeight, PixelFormat.Format24bppRgb);
         bitmap.SetResolution(300, 300);
         using Graphics graphics = Graphics.FromImage(bitmap);
-        graphics.SmoothingMode = SmoothingMode.HighQuality;
+        // 单元格和网格按整数像素绘制，避免高质量平滑在格子边缘产生模糊色缝。
+        graphics.SmoothingMode = SmoothingMode.None;
+        graphics.PixelOffsetMode = PixelOffsetMode.Half;
         graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
         graphics.Clear(Color.White);
 
-        using var titleFont = new Font("Microsoft YaHei UI", 22, FontStyle.Bold);
-        using var valueFont = new Font("Microsoft YaHei UI", 7.5f, FontStyle.Regular);
-        using var axisFont = new Font("Microsoft YaHei UI", 10, FontStyle.Regular);
-        using var gridPen = new Pen(Color.FromArgb(80, Color.Black), 1);
+        // 字号单位是 point；300 DPI 下 10 point 约为 42 个像素，与 MATLAB 参考图相近。
+        using var titleFont = new Font("Microsoft YaHei UI", 10, FontStyle.Regular);
+        // MATLAB 的数字字体比中文字体窄；Arial 可避免两位行号和 0.5 刻度在边缘被截断。
+        using var valueFont = new Font("Arial", 7.5f, FontStyle.Regular);
+        using var axisFont = new Font("Arial", 10, FontStyle.Regular);
+        Color axesColor = Color.FromArgb(33, 33, 33);
+        using var gridPen = new Pen(axesColor, 2);
+        using var axesBrush = new SolidBrush(axesColor);
         using var textBrush = new SolidBrush(Color.Black);
+
+        // 以下坐标按用户提供的 MATLAB 300 DPI 参考图测得。
+        // 数据区恰好覆盖 32 列×19 行；最外圈为 NaN 时会露出深灰坐标区。
+        const int plotLeft = 66;
+        const int plotTop = 47;
+        const int plotWidth = 3536;
+        const int plotHeight = 2295;
+        const int colorBarLeft = 3633;
+        const int colorBarWidth = 69;
+        const int colorBarHeight = 2195;
+        const int nanLegendTop = 2273;
+        const int nanLegendHeight = 69;
+
+        graphics.FillRectangle(axesBrush, plotLeft, plotTop, plotWidth, plotHeight);
+
         string title = $"crosstalk {folderName}";
         SizeF titleSize = graphics.MeasureString(title, titleFont);
-        graphics.DrawString(title, titleFont, textBrush, (bitmap.Width - titleSize.Width) / 2, 28);
+        graphics.DrawString(title, titleFont, textBrush,
+            plotLeft + (plotWidth - titleSize.Width) / 2, 0);
 
-        const float left = 70;
-        const float top = 100;
-        const float gridWidth = 1248;
-        const float gridHeight = 740;
-        float cellWidth = gridWidth / HeatmapColumns;
-        float cellHeight = gridHeight / HeatmapRows;
-        var center = new StringFormat
+        using var center = new StringFormat
         {
             Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Center
+            LineAlignment = StringAlignment.Center,
+            FormatFlags = StringFormatFlags.NoWrap
         };
 
         for (int row = 0; row < HeatmapRows; row++)
         {
+            int cellTop = plotTop + (int)Math.Round(row * plotHeight / (double)HeatmapRows);
+            int cellBottom = plotTop +
+                (int)Math.Round((row + 1) * plotHeight / (double)HeatmapRows);
+
+            // MATLAB 在左侧显示 1~19 行号，刻度与每个格子的垂直中心对齐。
+            var rowLabelRectangle = new RectangleF(
+                0, cellTop, plotLeft, cellBottom - cellTop);
+            graphics.DrawString((row + 1).ToString(CultureInfo.InvariantCulture),
+                axisFont, textBrush, rowLabelRectangle, center);
+
             for (int column = 0; column < HeatmapColumns; column++)
             {
                 double ratio = heatmapValues[row, column];
-                var rectangle = new RectangleF(
-                    left + column * cellWidth, top + row * cellHeight, cellWidth, cellHeight);
-                Color color = double.IsNaN(ratio)
-                    ? Color.FromArgb(225, 225, 225)
-                    : JetColor(Math.Clamp(ratio * 100d / 3d, 0d, 1d));
-                using (var fill = new SolidBrush(color)) graphics.FillRectangle(fill, rectangle);
-                graphics.DrawRectangle(gridPen, rectangle.X, rectangle.Y, rectangle.Width, rectangle.Height);
+                int cellLeft = plotLeft +
+                    (int)Math.Round(column * plotWidth / (double)HeatmapColumns);
+                int cellRight = plotLeft +
+                    (int)Math.Round((column + 1) * plotWidth / (double)HeatmapColumns);
 
-                if (!double.IsNaN(ratio))
-                {
-                    string value = RoundPercentage(ratio).ToString("0.000", CultureInfo.InvariantCulture);
-                    Color foreground = color.GetBrightness() < 0.48f ? Color.White : Color.Black;
-                    using var valueBrush = new SolidBrush(foreground);
-                    graphics.DrawString(value, valueFont, valueBrush, rectangle, center);
-                }
+                // NaN 表示不绘制的边框：不填色、不画格线，直接显示深灰坐标背景。
+                if (double.IsNaN(ratio)) continue;
+
+                var rectangle = new Rectangle(
+                    cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
+                Color color = JetColor(Math.Clamp(ratio * 100d / 3d, 0d, 1d));
+                using (var fill = new SolidBrush(color)) graphics.FillRectangle(fill, rectangle);
+                graphics.DrawRectangle(gridPen,
+                    rectangle.X, rectangle.Y, rectangle.Width, rectangle.Height);
+
+                // MATLAB 单元格最多保留三位小数，但会省略末尾的 0，例如 1.300 显示为 1.3。
+                string value = RoundPercentage(ratio)
+                    .ToString("0.###", CultureInfo.InvariantCulture);
+                double luminance =
+                    (0.299 * color.R + 0.587 * color.G + 0.114 * color.B) / 255d;
+                Color foreground = luminance < 0.48 ? Color.White : Color.Black;
+                using var valueBrush = new SolidBrush(foreground);
+                graphics.DrawString(value, valueFont, valueBrush, rectangle, center);
             }
         }
 
-        // MATLAB caxis([0,3]) 对应右侧 0%~3% 色条；超出 3% 的值仍绘制并钳制为红色。
-        const float colorBarX = 1360;
-        const float colorBarWidth = 40;
-        for (int pixel = 0; pixel < (int)gridHeight; pixel++)
+        // MATLAB 在数据区下方显示 1~32 列号，刻度与每个格子的水平中心对齐。
+        for (int column = 0; column < HeatmapColumns; column++)
         {
-            double normalized = 1d - pixel / (gridHeight - 1d);
+            int cellLeft = plotLeft +
+                (int)Math.Round(column * plotWidth / (double)HeatmapColumns);
+            int cellRight = plotLeft +
+                (int)Math.Round((column + 1) * plotWidth / (double)HeatmapColumns);
+            var columnLabelRectangle = new RectangleF(
+                cellLeft, plotTop + plotHeight, cellRight - cellLeft,
+                HeatmapImageHeight - (plotTop + plotHeight));
+            graphics.DrawString((column + 1).ToString(CultureInfo.InvariantCulture),
+                axisFont, textBrush, columnLabelRectangle, center);
+        }
+
+        // MATLAB caxis([0,3]) 对应右侧 0~3 色条；超过 3% 的异常值仍绘制并钳制为深红色。
+        for (int pixel = 1; pixel < colorBarHeight - 1; pixel++)
+        {
+            double normalized = 1d - (pixel - 1d) / (colorBarHeight - 3d);
             using var pen = new Pen(JetColor(normalized));
-            graphics.DrawLine(pen, colorBarX, top + pixel, colorBarX + colorBarWidth, top + pixel);
+            graphics.DrawLine(pen,
+                colorBarLeft + 1, plotTop + pixel,
+                colorBarLeft + colorBarWidth - 2, plotTop + pixel);
         }
-        graphics.DrawRectangle(Pens.Black, colorBarX, top, colorBarWidth, gridHeight);
-        for (int tick = 0; tick <= 3; tick++)
+        graphics.DrawRectangle(gridPen,
+            colorBarLeft, plotTop, colorBarWidth - 1, colorBarHeight - 1);
+
+        // MATLAB 参考图按 0.5 递增显示 0、0.5、1……3，数值本身已经代表百分比，不再附加 %。
+        for (int tick = 0; tick <= 6; tick++)
         {
-            float y = top + gridHeight * (1f - tick / 3f);
-            graphics.DrawLine(Pens.Black, colorBarX + colorBarWidth, y,
-                colorBarX + colorBarWidth + 8, y);
-            graphics.DrawString($"{tick}%", axisFont, textBrush,
-                colorBarX + colorBarWidth + 12, y - 10);
+            double tickValue = tick / 2d;
+            float y = plotTop + (colorBarHeight - 1) * (float)(1d - tickValue / 3d);
+            graphics.DrawLine(gridPen,
+                colorBarLeft + colorBarWidth - 1, y,
+                colorBarLeft + colorBarWidth + 11, y);
+            var tickRectangle = new RectangleF(
+                colorBarLeft + colorBarWidth + 10, y - 32, 80, 64);
+            graphics.DrawString(tickValue.ToString("0.#", CultureInfo.InvariantCulture),
+                axisFont, textBrush, tickRectangle, center);
         }
+
+        // MATLAB heatmap 会为缺失值单独显示深灰色 NaN 图例。
+        graphics.FillRectangle(axesBrush,
+            colorBarLeft, nanLegendTop, colorBarWidth, nanLegendHeight);
+        var nanLabelRectangle = new RectangleF(
+            colorBarLeft + colorBarWidth + 3, nanLegendTop,
+            HeatmapImageWidth - (colorBarLeft + colorBarWidth + 3), nanLegendHeight);
+        graphics.DrawString("NaN", axisFont, textBrush, nanLabelRectangle, center);
 
         bitmap.Save(path, ImageFormat.Png);
     }
