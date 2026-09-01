@@ -65,8 +65,6 @@ public sealed class TestPlanRunner : IAsyncDisposable
         {
             if (!_server.IsListening) throw new InvalidOperationException("请先启动 TCP 监听。");
             if (!_server.IsConnected) throw new InvalidOperationException("尚无 MRTEST/设备 TCP 客户端连接。");
-            _monitor.Start(configuration.MrTestExecutablePath);
-
             List<TestProject> projects = configuration.Projects
                 .Where(p => p.Enabled)
                 .OrderBy(p => p.Order)
@@ -103,8 +101,17 @@ public sealed class TestPlanRunner : IAsyncDisposable
         }
         finally
         {
-            _activeCancellation = null;
-            _runLock.Release();
+            try
+            {
+                // 即使发送、弹窗序列、数据处理或取消路径异常，也不允许监视器
+                // 在测试事务结束后留在后台继续处理 MRTEST 窗口。
+                await StopDialogMonitoringAsync(logWhenStopped: false).ConfigureAwait(false);
+            }
+            finally
+            {
+                _activeCancellation = null;
+                _runLock.Release();
+            }
         }
     }
 
@@ -212,7 +219,7 @@ public sealed class TestPlanRunner : IAsyncDisposable
                 await DelayAsync(step.StabilizeDelayMs, cancellationToken).ConfigureAwait(false);
             }
             string request = NormalizeRequest(step.MeasurementRequest);
-            DateTime completed = await SendMeasurementAsync(request, cancellationToken).ConfigureAwait(false);
+            DateTime completed = await SendMeasurementAsync(configuration, request, cancellationToken).ConfigureAwait(false);
             records.Add(new TestMeasurementRecord(++sequence, project.Name, imagePath, completed));
             Report(TestRunState.Running, round, configuration.WholePlanRepeatCount, project.Name,
                 iteration, project.RepeatCount, $"图卡完成：{step.DisplayName}");
@@ -237,7 +244,7 @@ public sealed class TestPlanRunner : IAsyncDisposable
             string imagePath = step.ResolveImagePath(configuration.ImageDirectory);
             await _projector.ProjectAsync(imagePath, configuration.ProjectionMode, cancellationToken).ConfigureAwait(false);
             await DelayAsync(step.StabilizeDelayMs, cancellationToken).ConfigureAwait(false);
-            DateTime completed = await SendMeasurementAsync(NormalizeRequest(step.MeasurementRequest), cancellationToken)
+            DateTime completed = await SendMeasurementAsync(configuration, NormalizeRequest(step.MeasurementRequest), cancellationToken)
                 .ConfigureAwait(false);
             records.Add(new TestMeasurementRecord(++sequence, project.Name, imagePath, completed));
             await _log($"串扰图卡 {sequence}/{ordered.Count} 完成：{step.DisplayName}").ConfigureAwait(false);
@@ -261,36 +268,46 @@ public sealed class TestPlanRunner : IAsyncDisposable
             }).ToArray();
         if (steps.Count == 0) throw new InvalidOperationException($"弹窗项目“{project.Name}”没有固定图卡步骤。");
         TimeSpan popupTimeout = TimeSpan.FromSeconds(Math.Clamp(project.PopupTimeoutSeconds, 1, 600));
-        await using var coordinator = new FixedPopupSequenceCoordinator(
-            _monitor,
-            _projector,
-            _log,
-            configuration.ProjectionMode,
-            popupTimeout);
-        using var popupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        coordinator.Arm(steps, configuration.AutoConfirmPopups, popupCancellation.Token);
-        string request = NormalizeRequest(steps[0].MeasurementRequest);
-        Task<string> responseTask = _server.SendAndWaitForCompletionAsync(
-            request,
-            popupTimeout,
-            popupCancellation.Token);
+        await StartDialogMonitoringAsync(configuration).ConfigureAwait(false);
         try
         {
-            Task popupTask = coordinator.Completion;
-            Task first = await Task.WhenAny(responseTask, popupTask).ConfigureAwait(false);
-            if (first.IsFaulted || first.IsCanceled)
+            await using var coordinator = new FixedPopupSequenceCoordinator(
+                _monitor,
+                _projector,
+                _log,
+                configuration.ProjectionMode,
+                popupTimeout);
+            using var popupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            coordinator.Arm(steps, configuration.AutoConfirmPopups, popupCancellation.Token);
+            string request = NormalizeRequest(steps[0].MeasurementRequest);
+            await _log($"发送测量：{request}；等待最终完成返回（最长 {popupTimeout.TotalSeconds:0} 秒）")
+                .ConfigureAwait(false);
+            Task<string> responseTask = _server.SendAndWaitForCompletionAsync(
+                request,
+                popupTimeout,
+                popupCancellation.Token);
+            try
+            {
+                Task popupTask = coordinator.Completion;
+                Task first = await Task.WhenAny(responseTask, popupTask).ConfigureAwait(false);
+                if (first.IsFaulted || first.IsCanceled)
+                {
+                    popupCancellation.Cancel();
+                    try { await Task.WhenAll(responseTask, popupTask).ConfigureAwait(false); } catch { }
+                    await first.ConfigureAwait(false);
+                }
+                await Task.WhenAll(responseTask, popupTask).ConfigureAwait(false);
+            }
+            catch
             {
                 popupCancellation.Cancel();
-                try { await Task.WhenAll(responseTask, popupTask).ConfigureAwait(false); } catch { }
-                await first.ConfigureAwait(false);
+                coordinator.Fail(new InvalidOperationException("弹窗序列未完成，已停止当前项目。"));
+                throw;
             }
-            await Task.WhenAll(responseTask, popupTask).ConfigureAwait(false);
         }
-        catch
+        finally
         {
-            popupCancellation.Cancel();
-            coordinator.Fail(new InvalidOperationException("弹窗序列未完成，已停止当前项目。"));
-            throw;
+            await StopDialogMonitoringAsync(logWhenStopped: true).ConfigureAwait(false);
         }
         DateTime completed = DateTime.UtcNow;
         for (int i = 0; i < steps.Count; i++)
@@ -298,14 +315,42 @@ public sealed class TestPlanRunner : IAsyncDisposable
         await _log($"弹窗项目完成：{project.Name}（{steps.Count} 张固定图卡）").ConfigureAwait(false);
     }
 
-    private async Task<DateTime> SendMeasurementAsync(string request, CancellationToken cancellationToken)
+    private async Task<DateTime> SendMeasurementAsync(
+        TestPlanConfiguration configuration,
+        string request,
+        CancellationToken cancellationToken)
     {
         if (!CommandResponseMatcher.SupportsRequest(request))
             throw new FormatException($"不支持等待完成的测量报文：{request}");
-        await _log($"发送测量：{request}；等待最终完成返回（最长 600 秒）").ConfigureAwait(false);
-        await _server.SendAndWaitForCompletionAsync(
-            request, MessageProtocol.MeasurementResponseTimeout, cancellationToken).ConfigureAwait(false);
-        return DateTime.UtcNow;
+        await StartDialogMonitoringAsync(configuration).ConfigureAwait(false);
+        try
+        {
+            await _log($"发送测量：{request}；等待最终完成返回（最长 600 秒）").ConfigureAwait(false);
+            await _server.SendAndWaitForCompletionAsync(
+                request, MessageProtocol.MeasurementResponseTimeout, cancellationToken).ConfigureAwait(false);
+            return DateTime.UtcNow;
+        }
+        finally
+        {
+            await StopDialogMonitoringAsync(logWhenStopped: true).ConfigureAwait(false);
+        }
+    }
+
+    private async Task StartDialogMonitoringAsync(TestPlanConfiguration configuration)
+    {
+        // 每条测量报文建立独立窗口期。先等待上一窗口期彻底退出，再按当前
+        // MRTEST 路径重新绑定 PID，防止跨测试项保留旧窗口或旧实例状态。
+        await _monitor.StopAsync().ConfigureAwait(false);
+        _monitor.Start(configuration.MrTestExecutablePath);
+        await _log("测量命令窗口已启动 MRTEST 弹窗监视。").ConfigureAwait(false);
+    }
+
+    private async Task StopDialogMonitoringAsync(bool logWhenStopped)
+    {
+        bool wasRunning = _monitor.IsRunning;
+        await _monitor.StopAsync().ConfigureAwait(false);
+        if (wasRunning && logWhenStopped)
+            await _log("测量事务结束，MRTEST 弹窗监视已停止。").ConfigureAwait(false);
     }
 
     private static void ValidateProjects(TestPlanConfiguration configuration, IReadOnlyList<TestProject> projects)

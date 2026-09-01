@@ -14,7 +14,7 @@
     <UseSystemDrawing>true</UseSystemDrawing>
     <AssemblyName>AutoTestClient</AssemblyName>
     <RootNamespace>AutoTestClient</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <AssemblyTitle>一键光学测试客户端</AssemblyTitle>
     <Product>一键光学测试客户端</Product>
     <Platforms>AnyCPU;x64</Platforms>

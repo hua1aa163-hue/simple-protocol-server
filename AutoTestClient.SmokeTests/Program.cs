@@ -1,6 +1,9 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Drawing;
+using AutoTestClient.Controls;
+using AutoTestClient.Logging;
 using AutoTestClient.Networking;
 using AutoTestClient.Protocol;
 using AutoTestClient.Models;
@@ -41,6 +44,31 @@ Check(Math.Abs(crosstalk.Mean - 0.01) < 1e-9, "串扰比值和 3% 异常阈值")
 Check(MessageProtocol.GetResponseTimeout(MessageProtocol.DefaultMeasurementRequest) == TimeSpan.FromSeconds(600), "测量等待上限 600 秒");
 var defaults = new TestPlanConfiguration(); defaults.Normalize();
 Check(defaults.Projects.Count == 5 && defaults.Projects[0].Kind == TestProjectKind.Fov && defaults.Projects[^1].Kind == TestProjectKind.Crosstalk, "默认项目顺序");
+
+var logBuffer = new LogLineBuffer(cleanupThreshold: 200, retainedAfterCleanup: 150);
+bool cleanupTriggered = false;
+for (int i = 1; i <= 200; i++) cleanupTriggered = logBuffer.Add($"日志{i}") || cleanupTriggered;
+Check(cleanupTriggered && logBuffer.Count == 150 && logBuffer.Lines[0] == "日志51" && logBuffer.Lines[^1] == "日志200",
+    "日志达到 200 行时清理最旧 50 行");
+logBuffer.Clear();
+Check(logBuffer.Count == 0, "手动清空同时清除日志缓冲");
+
+Check(RunOnStaThread(() =>
+{
+    using var list = new TestableCheckboxOnlyCheckedListBox { Size = new Size(300, 100) };
+    list.Items.Add("第一项", false);
+    list.Items.Add("第二项", false);
+    list.CreateControl();
+    Rectangle first = list.GetItemRectangle(0);
+    Rectangle second = list.GetItemRectangle(1);
+    list.ClickAt(new Point(first.Left + 80, first.Top + first.Height / 2));
+    bool textOnlySelected = list.SelectedIndex == 0 && !list.GetItemChecked(0);
+    list.ClickAt(new Point(first.Left + 3, first.Top + first.Height / 2));
+    bool checkboxToggled = list.SelectedIndex == 0 && list.GetItemChecked(0);
+    list.ClickAt(new Point(second.Left + 80, second.Top + second.Height / 2));
+    return textOnlySelected && checkboxToggled && list.SelectedIndex == 1 &&
+           list.GetItemChecked(0) && !list.GetItemChecked(1);
+}), "计划列表文字只选择、复选框才切换");
 
 await using (var server = new TcpMessageServer())
 {
@@ -90,6 +118,7 @@ await using (var integrationServer = new TcpMessageServer())
     await runner.RunAsync(plan);
     await responder;
     Check(projector.Paths.Count == 8 && processor.Calls.Count == 4, "整套/项目重复次数展开");
+    Check(!monitor.IsRunning, "一键计划完成后弹窗监视已停止");
 }
 
 await using (var cancelServer = new TcpMessageServer())
@@ -107,6 +136,29 @@ await using (var cancelServer = new TcpMessageServer())
     Check(cancelled, "取消不会等待 600 秒");
 }
 
+await using (var runnerCancelServer = new TcpMessageServer())
+{
+    await runnerCancelServer.StartAsync(IPAddress.Loopback, 0);
+    using var peer = new TcpClient(); await peer.ConnectAsync(IPAddress.Loopback, runnerCancelServer.Port);
+    using NetworkStream stream = peer.GetStream();
+    using var reader = new StreamReader(stream, Encoding.UTF8, false, 4096, leaveOpen: true);
+    for (int i = 0; i < 20 && !runnerCancelServer.IsConnected; i++) await Task.Delay(25);
+    var projector = new FakeProjector(); var processor = new FakeProcessor(); await using var monitor = new MrTestDialogMonitor();
+    await using var runner = new TestPlanRunner(runnerCancelServer, projector, monitor, processor);
+    var plan = new TestPlanConfiguration { ImageDirectory = integrationRoot, Projects = new List<TestProject> {
+        new() { Enabled = true, Order = 1, Name = "取消测试", Kind = TestProjectKind.Generic, RepeatCount = 1, Steps = new() {
+            new() { Order = 1, Name = "1", ImagePath = image1 } } } } };
+    using var cts = new CancellationTokenSource();
+    Task running = runner.RunAsync(plan, cts.Token);
+    _ = await reader.ReadToEndUntilFrameAsync();
+    bool activeDuringCommand = monitor.IsRunning;
+    cts.Cancel();
+    bool runnerCancelled = false;
+    try { await running; } catch (OperationCanceledException) { runnerCancelled = true; }
+    Check(activeDuringCommand && runnerCancelled && !monitor.IsRunning,
+        "测量命令期间启动监视，取消后立即停止");
+}
+
 if (failures.Count > 0)
 {
     Console.Error.WriteLine($"{failures.Count} smoke test(s) failed.");
@@ -114,6 +166,22 @@ if (failures.Count > 0)
 }
 Console.WriteLine("All smoke tests passed.");
 return 0;
+
+static bool RunOnStaThread(Func<bool> action)
+{
+    bool result = false;
+    Exception? failure = null;
+    var thread = new Thread(() =>
+    {
+        try { result = action(); }
+        catch (Exception ex) { failure = ex; }
+    });
+    thread.SetApartmentState(ApartmentState.STA);
+    thread.Start();
+    thread.Join();
+    if (failure is not null) Console.Error.WriteLine(failure);
+    return failure is null && result;
+}
 
 static class StreamExtensions
 {
@@ -148,4 +216,10 @@ sealed class FakeProcessor : ITestDataProcessor
         Calls.Add(project);
         return Task.FromResult(new TestDataProcessingResult(project.Name, project.Kind, Array.Empty<TestMetric>()));
     }
+}
+
+sealed class TestableCheckboxOnlyCheckedListBox : CheckboxOnlyCheckedListBox
+{
+    public void ClickAt(Point point) =>
+        base.OnMouseDown(new MouseEventArgs(MouseButtons.Left, 1, point.X, point.Y, 0));
 }

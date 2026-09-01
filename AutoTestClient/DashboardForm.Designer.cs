@@ -2,6 +2,7 @@
 using System.ComponentModel;
 using System.Drawing;
 using System.Windows.Forms;
+using AutoTestClient.Controls;
 
 namespace AutoTestClient
 {
@@ -57,7 +58,7 @@ namespace AutoTestClient
         private Button buttonBrowseImage;
         private Button buttonBrowseOutput;
 
-        private CheckedListBox checkedListProjects;
+        private CheckboxOnlyCheckedListBox checkedListProjects;
         private NumericUpDown numericWholeRepeat;
         private NumericUpDown numericProjectRepeat;
         private NumericUpDown numericPopupDelay;
@@ -123,7 +124,7 @@ namespace AutoTestClient
             textBoxManualCommand = new TextBox();
             groupPlan = new GroupBox();
             planTable = new TableLayoutPanel();
-            checkedListProjects = new CheckedListBox();
+            checkedListProjects = new CheckboxOnlyCheckedListBox();
             labelProgress = new Label();
             planOptions = new TableLayoutPanel();
             labelWholeRepeat = new Label();
@@ -728,7 +729,7 @@ namespace AutoTestClient
             // checkedListProjects
             // 
             checkedListProjects.BorderStyle = BorderStyle.FixedSingle;
-            checkedListProjects.CheckOnClick = true;
+            checkedListProjects.CheckOnClick = false;
             checkedListProjects.Dock = DockStyle.Fill;
             checkedListProjects.FormattingEnabled = true;
             checkedListProjects.Items.AddRange(new object[] { "1. FOV测试 [FOV] ×1", "2. 黑白对比度 [黑白对比度] ×1", "3. 亮度均匀性 [亮度均匀性] ×1", "4. 色域 [色域] ×1", "5. 串扰 [串扰] ×1" });

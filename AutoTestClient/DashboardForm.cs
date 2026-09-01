@@ -1,6 +1,7 @@
 using System.Net;
 using System.ComponentModel;
 using AutoTestClient.Models;
+using AutoTestClient.Logging;
 using AutoTestClient.Monitoring;
 using AutoTestClient.Networking;
 using AutoTestClient.Projection;
@@ -28,11 +29,12 @@ public partial class DashboardForm : Form
     // 独立记录一键测试状态，避免手动事务结束时覆盖 SetRunningUi 的禁用状态。
     private bool _planRunning;
     private bool _closing;
-    // MRTEST 在客户端断开后会留下“服务器退出”等模态框；只记录发现而
-    // 不处理会阻塞它重新连接。空闲时由这里兜底确认，计划运行期间则交给
-    // FixedPopupSequenceCoordinator，避免两个消费者同时取同一张图卡。
-    private readonly object _idleDialogGate = new();
-    private readonly HashSet<nint> _idleDialogConfirming = new();
+    private readonly LogLineBuffer _logLines = new(cleanupThreshold: 200, retainedAfterCleanup: 150);
+    // 手动报文没有固定图卡协调器；发送窗口内若出现弹窗，由这里兜底确认。
+    // 一键计划期间仍只交给 FixedPopupSequenceCoordinator，避免两个消费者
+    // 同时取同一张图卡。事务结束后监视器停止，不处理空闲窗口。
+    private readonly object _manualDialogGate = new();
+    private readonly HashSet<nint> _manualDialogConfirming = new();
     public DashboardForm()
     {
         InitializeComponent();
@@ -53,8 +55,6 @@ public partial class DashboardForm : Form
         if (IsInDesigner()) return;
         _configuration = _settingsStore.Load();
         ApplyConfigurationToControls();
-        _monitor.Start(_configuration.MrTestExecutablePath);
-        _monitor.RequeueCurrentDialogs();
         AppendLog($"配置文件：{_settingsStore.FilePath}");
         AppendLog("已加载首版测试计划。TCP 角色为服务端，等待 MRTEST/设备客户端连接。");
         AppendLog($"测量请求固定默认值：{MessageProtocol.DefaultMeasurementRequest}；完成等待上限：600 秒。");
@@ -159,13 +159,6 @@ public partial class DashboardForm : Form
         if (_runTask is { IsCompleted: false }) return;
         ReadConfigurationFromControls();
         try { _settingsStore.Save(_configuration); } catch (Exception ex) { AppendLog($"保存配置失败：{ex.Message}"); }
-        try
-        {
-            await _monitor.StopAsync();
-            _monitor.Start(_configuration.MrTestExecutablePath);
-            _monitor.RequeueCurrentDialogs();
-        }
-        catch (Exception ex) { AppendLog($"启动 MRTEST 弹窗监视失败：{ex.Message}"); }
         if (!_server.IsListening || !_server.IsConnected)
         {
             MessageBox.Show(this, "请先启动监听，并等待 MRTEST/设备客户端连接。", "无法开始", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -260,6 +253,9 @@ public partial class DashboardForm : Form
             ReadConfigurationFromControls();
             _configuration.ManualCommand = normalized;
             try { _settingsStore.Save(_configuration); } catch (Exception ex) { AppendLog($"保存手动报文失败：{ex.Message}"); }
+            await _monitor.StopAsync();
+            _monitor.Start(_configuration.MrTestExecutablePath);
+            AppendLog("手动报文发送窗口已启动 MRTEST 弹窗监视。");
             string response = await _server.SendAndWaitForCompletionAsync(normalized);
             AppendLog($"手动报文完成：{response}");
         }
@@ -271,12 +267,25 @@ public partial class DashboardForm : Form
         }
         finally
         {
+            try
+            {
+                await _monitor.StopAsync();
+                AppendLog("手动报文事务结束，MRTEST 弹窗监视已停止。");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"停止 MRTEST 弹窗监视失败：{ex.Message}");
+            }
             _manualSendInProgress = false;
             UpdateManualButtonState();
         }
     }
 
-    private void ButtonClearLog_Click(object? sender, EventArgs e) => textBoxLog.Clear();
+    private void ButtonClearLog_Click(object? sender, EventArgs e)
+    {
+        _logLines.Clear();
+        textBoxLog.Clear();
+    }
 
     private void ButtonRecipeManager_Click(object? sender, EventArgs e)
     {
@@ -371,30 +380,32 @@ public partial class DashboardForm : Form
     {
         AppendLog($"发现 MRTEST 弹窗：0x{dialog.Handle.ToInt64():X}（{dialog.Title}）");
 
-        // 一键测试进行中，固定图卡协调器是唯一消费者；空闲时自动处理
-        // MRTEST 的残留/连接错误对话框，确保下一次 TCP 连接不会被阻塞。
+        // 一键测试进行中，固定图卡协调器是唯一消费者；手动报文期间没有
+        // 固定图卡队列，由这里按当前自动确认设置处理弹窗。正常空闲状态
+        // 监视器已经停止，不会继续操作 MRTEST 窗口。
         if (_closing || _planRunning || _runTask is { IsCompleted: false }) return;
-        lock (_idleDialogGate)
+        if (!_manualSendInProgress || !_configuration.AutoConfirmPopups) return;
+        lock (_manualDialogGate)
         {
-            if (!_idleDialogConfirming.Add(dialog.Handle)) return;
+            if (!_manualDialogConfirming.Add(dialog.Handle)) return;
         }
-        _ = ConfirmIdleDialogAsync(dialog);
+        _ = ConfirmManualDialogAsync(dialog);
     }
 
-    private async Task ConfirmIdleDialogAsync(MrTestDialogDetectedEventArgs dialog)
+    private async Task ConfirmManualDialogAsync(MrTestDialogDetectedEventArgs dialog)
     {
         try
         {
             await _monitor.ConfirmOkAsync(dialog.Handle).ConfigureAwait(false);
-            AppendLog($"空闲状态已自动确认 MRTEST 弹窗：0x{dialog.Handle.ToInt64():X}");
+            AppendLog($"手动报文期间已自动确认 MRTEST 弹窗：0x{dialog.Handle.ToInt64():X}");
         }
         catch (Exception ex)
         {
-            AppendLog($"空闲状态自动确认 MRTEST 弹窗失败：{ex.Message}");
+            AppendLog($"手动报文期间自动确认 MRTEST 弹窗失败：{ex.Message}");
         }
         finally
         {
-            lock (_idleDialogGate) _idleDialogConfirming.Remove(dialog.Handle);
+            lock (_manualDialogGate) _manualDialogConfirming.Remove(dialog.Handle);
         }
     }
 
@@ -447,7 +458,11 @@ public partial class DashboardForm : Form
         OnUi(() =>
         {
             string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
-            textBoxLog.AppendText(line + Environment.NewLine);
+            bool cleaned = _logLines.Add(line);
+            if (cleaned)
+                textBoxLog.Lines = _logLines.Lines.ToArray();
+            else
+                textBoxLog.AppendText(line + Environment.NewLine);
             textBoxLog.SelectionStart = textBoxLog.TextLength; textBoxLog.ScrollToCaret();
         });
     }
