@@ -1,0 +1,488 @@
+using System.Net;
+using System.ComponentModel;
+using AutoTestClient.Models;
+using AutoTestClient.Monitoring;
+using AutoTestClient.Networking;
+using AutoTestClient.Projection;
+using AutoTestClient.Protocol;
+using AutoTestClient.Settings;
+using AutoTestClient.Workflow;
+
+namespace AutoTestClient;
+
+/// <summary>
+/// 一键测试主界面。所有可编辑控件的值在关闭时写回用户配置目录。
+/// </summary>
+public partial class DashboardForm : Form
+{
+    private readonly SettingsStore _settingsStore = new();
+    private readonly TcpMessageServer _server = new();
+    private readonly MrTestDialogMonitor _monitor = new();
+    private readonly ScreenImageProjector _projector;
+    private TestPlanConfiguration _configuration = new();
+    private TestPlanRunner? _runner;
+    private Task? _runTask;
+    private DataProcessing.TestDataProcessingResult? _lastCrosstalkResult;
+    // 手动报文是异步事务；在收到最终应答前禁止再次点击，避免重复测量。
+    private bool _manualSendInProgress;
+    // 独立记录一键测试状态，避免手动事务结束时覆盖 SetRunningUi 的禁用状态。
+    private bool _planRunning;
+    private bool _closing;
+    // MRTEST 在客户端断开后会留下“服务器退出”等模态框；只记录发现而
+    // 不处理会阻塞它重新连接。空闲时由这里兜底确认，计划运行期间则交给
+    // FixedPopupSequenceCoordinator，避免两个消费者同时取同一张图卡。
+    private readonly object _idleDialogGate = new();
+    private readonly HashSet<nint> _idleDialogConfirming = new();
+    public DashboardForm()
+    {
+        InitializeComponent();
+        _projector = new ScreenImageProjector(SynchronizationContext.Current);
+        if (IsInDesigner()) return;
+        _server.ClientConnected += Server_ClientConnected;
+        _server.MessageSent += Server_MessageSent;
+        _server.MessageReceived += Server_MessageReceived;
+        _server.ConnectionClosed += Server_ConnectionClosed;
+        _server.ProtocolError += Server_ProtocolError;
+        _monitor.MonitorError += (_, ex) => AppendLog($"弹窗监视错误：{ex.Message}");
+        _monitor.MonitorLog += (_, message) => AppendLog($"弹窗监视：{message}");
+        _monitor.DialogDetected += Monitor_DialogDetected;
+    }
+
+    private async void DashboardForm_Load(object? sender, EventArgs e)
+    {
+        if (IsInDesigner()) return;
+        _configuration = _settingsStore.Load();
+        ApplyConfigurationToControls();
+        _monitor.Start(_configuration.MrTestExecutablePath);
+        _monitor.RequeueCurrentDialogs();
+        AppendLog($"配置文件：{_settingsStore.FilePath}");
+        AppendLog("已加载首版测试计划。TCP 角色为服务端，等待 MRTEST/设备客户端连接。");
+        AppendLog($"测量请求固定默认值：{MessageProtocol.DefaultMeasurementRequest}；完成等待上限：600 秒。");
+        // 与参考服务端一致，启动后自动监听；按钮仍可随时停止/重启。
+        await StartListeningFromSettingsAsync();
+    }
+
+    private void ApplyConfigurationToControls()
+    {
+        textBoxBindAddress.Text = _configuration.BindAddress;
+        textBoxPort.Text = _configuration.Port.ToString();
+        textBoxMrTest.Text = _configuration.MrTestExecutablePath;
+        textBoxExport.Text = _configuration.ExportDirectory;
+        textBoxRecipeDir.Text = _configuration.RecipeDirectory;
+        textBoxImageDir.Text = _configuration.ImageDirectory;
+        textBoxOutputDir.Text = _configuration.OutputDirectory;
+        textBoxManualCommand.Text = string.IsNullOrWhiteSpace(_configuration.ManualCommand)
+            ? MessageProtocol.DefaultMeasurementRequest : _configuration.ManualCommand;
+        numericWholeRepeat.Value = Math.Clamp(_configuration.WholePlanRepeatCount, 1, 9999);
+        numericPopupDelay.Value = Math.Clamp(_configuration.PopupStabilizeDelayMs, 0, 60000);
+        numericProjectRepeat.Value = Math.Clamp(_configuration.DefaultProjectRepeatCount, 1, 9999);
+        comboProjectionMode.SelectedIndex = _configuration.ProjectionMode == ProjectionMode.FitToWindow ? 1 : 0;
+        checkAutoConfirm.Checked = _configuration.AutoConfirmPopups;
+        checkedListProjects.Items.Clear();
+        foreach (TestProject project in _configuration.Projects.OrderBy(p => p.Order))
+            checkedListProjects.Items.Add($"{project.Order}. {project.Name} [{project.KindDisplayName}] ×{project.RepeatCount}", project.Enabled);
+        if (checkedListProjects.Items.Count > 0)
+            checkedListProjects.SelectedIndex = Math.Clamp(_configuration.SelectedProjectIndex, 0, checkedListProjects.Items.Count - 1);
+        UpdateSelectedProjectRepeat();
+        UpdateManualButtonState();
+    }
+
+    private void ReadConfigurationFromControls()
+    {
+        _configuration.BindAddress = textBoxBindAddress.Text.Trim();
+        if (int.TryParse(textBoxPort.Text.Trim(), out int port)) _configuration.Port = Math.Clamp(port, 1, 65535);
+        _configuration.MrTestExecutablePath = textBoxMrTest.Text.Trim();
+        _configuration.ExportDirectory = textBoxExport.Text.Trim();
+        _configuration.RecipeDirectory = textBoxRecipeDir.Text.Trim();
+        _configuration.ImageDirectory = textBoxImageDir.Text.Trim();
+        _configuration.OutputDirectory = textBoxOutputDir.Text.Trim();
+        _configuration.ManualCommand = textBoxManualCommand.Text.Trim();
+        _configuration.WholePlanRepeatCount = (int)numericWholeRepeat.Value;
+        _configuration.DefaultProjectRepeatCount = (int)numericProjectRepeat.Value;
+        _configuration.PopupStabilizeDelayMs = (int)numericPopupDelay.Value;
+        _configuration.AutoConfirmPopups = checkAutoConfirm.Checked;
+        _configuration.ProjectionMode = comboProjectionMode.SelectedIndex == 1 ? ProjectionMode.FitToWindow : ProjectionMode.PixelPerfect;
+        for (int i = 0; i < _configuration.Projects.Count && i < checkedListProjects.Items.Count; i++)
+            _configuration.Projects[i].Enabled = checkedListProjects.GetItemChecked(i);
+        int selectedProject = checkedListProjects.SelectedIndex;
+        if (selectedProject >= 0 && selectedProject < _configuration.Projects.Count)
+            _configuration.Projects[selectedProject].RepeatCount = (int)numericProjectRepeat.Value;
+        _configuration.SelectedProjectIndex = Math.Max(0, checkedListProjects.SelectedIndex);
+        _configuration.Normalize();
+    }
+
+    private async void ButtonListen_Click(object? sender, EventArgs e)
+    {
+        if (_server.IsListening)
+        {
+            await StopListeningAsync();
+            return;
+        }
+        await StartListeningFromSettingsAsync();
+    }
+
+    private async Task StartListeningFromSettingsAsync()
+    {
+        ReadConfigurationFromControls();
+        if (!TryResolveAddress(_configuration.BindAddress, out IPAddress? address, out string error))
+        {
+            AppendLog(error);
+            if (!_closing) MessageBox.Show(this, error, "监听地址", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+        try
+        {
+            await _server.StartAsync(address!, _configuration.Port);
+            buttonListen.Text = "停止监听";
+            labelConnectionState.Text = $"监听中：{address}:{_server.Port}，等待客户端";
+            UpdateManualButtonState();
+            AppendLog($"TCP 服务端已监听 {address}:{_server.Port}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"启动监听失败：{ex.Message}");
+            if (!_closing) MessageBox.Show(this, ex.Message, "启动监听失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private async Task StopListeningAsync()
+    {
+        try { await _server.StopAsync(); }
+        catch (Exception ex) { AppendLog($"停止监听失败：{ex.Message}"); }
+        buttonListen.Text = "启动监听";
+        labelConnectionState.Text = "未监听";
+        UpdateManualButtonState();
+    }
+
+    private async void ButtonStart_Click(object? sender, EventArgs e)
+    {
+        if (_runTask is { IsCompleted: false }) return;
+        ReadConfigurationFromControls();
+        try { _settingsStore.Save(_configuration); } catch (Exception ex) { AppendLog($"保存配置失败：{ex.Message}"); }
+        try
+        {
+            await _monitor.StopAsync();
+            _monitor.Start(_configuration.MrTestExecutablePath);
+            _monitor.RequeueCurrentDialogs();
+        }
+        catch (Exception ex) { AppendLog($"启动 MRTEST 弹窗监视失败：{ex.Message}"); }
+        if (!_server.IsListening || !_server.IsConnected)
+        {
+            MessageBox.Show(this, "请先启动监听，并等待 MRTEST/设备客户端连接。", "无法开始", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        _runner ??= new TestPlanRunner(_server, _projector, _monitor, log: message => { AppendLog(message); return Task.CompletedTask; });
+        _runner.DataResultProduced -= Runner_DataResultProduced;
+        _runner.DataResultProduced += Runner_DataResultProduced;
+        _runner.ProgressChanged -= Runner_ProgressChanged;
+        _runner.ProgressChanged += Runner_ProgressChanged;
+        gridResults.Rows.Clear();
+        _lastCrosstalkResult = null;
+        buttonViewCrosstalk.Enabled = false;
+        SetRunningUi(true);
+        _runTask = RunPlanSafeAsync(_configuration);
+        await _runTask;
+    }
+
+    private async Task RunPlanSafeAsync(TestPlanConfiguration configuration)
+    {
+        try
+        {
+            await _runner!.RunAsync(configuration);
+            AppendLog("一键测试计划完成。");
+        }
+        catch (OperationCanceledException) { AppendLog("一键测试已停止。"); }
+        catch (Exception ex)
+        {
+            AppendLog($"一键测试失败：{ex.Message}");
+            if (!_closing) MessageBox.Show(this, ex.Message, "测试失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            if (!_closing)
+            {
+                SetRunningUi(false);
+                labelProgress.Text = _runner?.State switch
+                {
+                    TestRunState.Completed => "完成",
+                    TestRunState.Cancelled => "已停止",
+                    TestRunState.Failed => "失败",
+                    _ => "等待开始"
+                };
+            }
+        }
+    }
+
+    private async void ButtonStop_Click(object? sender, EventArgs e)
+    {
+        _runner?.Cancel();
+        if (_server.IsConnected)
+        {
+            try
+            {
+                await _server.SendAndWaitForCompletionAsync("&|Stop|@", TimeSpan.FromSeconds(10));
+                AppendLog("已向设备发送停止命令。");
+            }
+            catch (Exception ex) { AppendLog($"停止命令未完成：{ex.Message}"); }
+        }
+    }
+
+    private async void ButtonSendManual_Click(object? sender, EventArgs e)
+    {
+        if (_manualSendInProgress) return;
+
+        // 旧版本默认值曾误把 Run 中间响应当作发送请求。手动发送入口
+        // 也必须先迁移，避免用户配置或旧界面残留值绕过设置迁移直接发出。
+        string command = MessageProtocol.MigrateMeasurementRequest(textBoxManualCommand.Text);
+        if (!string.Equals(command, textBoxManualCommand.Text.Trim(), StringComparison.Ordinal))
+        {
+            textBoxManualCommand.Text = command;
+            AppendLog($"已将历史测量请求迁移为：{command}");
+        }
+        if (!MessageProtocol.TryValidateMessage(command, out string normalized, out string error))
+        {
+            MessageBox.Show(this, error, "报文格式", MessageBoxButtons.OK, MessageBoxIcon.Warning); return;
+        }
+        normalized = MessageProtocol.MigrateMeasurementRequest(normalized);
+        if (!_server.IsListening || !_server.IsConnected)
+        {
+            const string notConnected = "请先启动监听，并等待 MRTEST/设备客户端连接。";
+            AppendLog($"手动报文未发送：{notConnected}");
+            if (!_closing)
+                MessageBox.Show(this, notConnected, "无法发送报文", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        _manualSendInProgress = true;
+        UpdateManualButtonState();
+        try
+        {
+            ReadConfigurationFromControls();
+            _configuration.ManualCommand = normalized;
+            try { _settingsStore.Save(_configuration); } catch (Exception ex) { AppendLog($"保存手动报文失败：{ex.Message}"); }
+            string response = await _server.SendAndWaitForCompletionAsync(normalized);
+            AppendLog($"手动报文完成：{response}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"手动报文失败：{ex.Message}");
+            if (!_closing)
+                MessageBox.Show(this, ex.Message, "报文失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _manualSendInProgress = false;
+            UpdateManualButtonState();
+        }
+    }
+
+    private void ButtonClearLog_Click(object? sender, EventArgs e) => textBoxLog.Clear();
+
+    private void ButtonRecipeManager_Click(object? sender, EventArgs e)
+    {
+        ReadConfigurationFromControls();
+        using var form = new RecipeManagerForm(_configuration, _settingsStore);
+        if (form.ShowDialog(this) == DialogResult.OK)
+        {
+            _configuration = form.Configuration;
+            ApplyConfigurationToControls();
+            _settingsStore.Save(_configuration);
+            AppendLog("测试项目/固定图卡顺序已更新并保存。");
+        }
+    }
+
+    private void Runner_DataResultProduced(object? sender, DataProcessing.TestDataProcessingResult result)
+    {
+        OnUi(() =>
+        {
+            foreach (DataProcessing.TestMetric metric in result.Metrics)
+                gridResults.Rows.Add(result.ProjectName, metric.DisplayName, metric.Value, metric.Source, metric.Status, result.OutputDirectory ?? string.Empty);
+            if (result.Kind == TestProjectKind.Crosstalk && !string.IsNullOrWhiteSpace(result.HeatmapPath))
+            {
+                _lastCrosstalkResult = result;
+                buttonViewCrosstalk.Enabled = File.Exists(result.HeatmapPath);
+            }
+        });
+    }
+
+    private void ButtonViewCrosstalk_Click(object? sender, EventArgs e)
+    {
+        if (_lastCrosstalkResult is null) return;
+        using var form = new CrosstalkResultForm(_lastCrosstalkResult);
+        form.ShowDialog(this);
+    }
+
+    private void Runner_ProgressChanged(object? sender, TestRunProgress progress) =>
+        OnUi(() => labelProgress.Text = progress.Message);
+
+    private void ButtonApplyProjectRepeat_Click(object? sender, EventArgs e)
+    {
+        int index = checkedListProjects.SelectedIndex;
+        if (index < 0 || index >= _configuration.Projects.Count) return;
+        _configuration.Projects[index].RepeatCount = (int)numericProjectRepeat.Value;
+        ApplyConfigurationToControls();
+        ReadConfigurationFromControls();
+        _settingsStore.Save(_configuration);
+        AppendLog($"已将项目“{_configuration.Projects[index].Name}”设置为 {(int)numericProjectRepeat.Value} 次。");
+    }
+
+    private void UpdateSelectedProjectRepeat()
+    {
+        int index = checkedListProjects.SelectedIndex;
+        if (index >= 0 && index < _configuration.Projects.Count)
+            numericProjectRepeat.Value = Math.Clamp(_configuration.Projects[index].RepeatCount, 1, 9999);
+    }
+
+    private void CheckedListProjects_SelectedIndexChanged(object? sender, EventArgs e) => UpdateSelectedProjectRepeat();
+
+    private void BrowseMrTest_Click(object? sender, EventArgs e)
+    {
+        using var dialog = new OpenFileDialog { Filter = "MRTEST 程序|MRTest.exe|可执行文件|*.exe|所有文件|*.*", FileName = textBoxMrTest.Text };
+        if (dialog.ShowDialog(this) == DialogResult.OK) textBoxMrTest.Text = dialog.FileName;
+    }
+
+    private void BrowseExport_Click(object? sender, EventArgs e) => BrowseFolder(textBoxExport);
+    private void BrowseRecipe_Click(object? sender, EventArgs e) => BrowseFolder(textBoxRecipeDir);
+    private void BrowseImage_Click(object? sender, EventArgs e) => BrowseFolder(textBoxImageDir);
+    private void BrowseOutput_Click(object? sender, EventArgs e) => BrowseFolder(textBoxOutputDir);
+    private void BrowseFolder(TextBox target)
+    {
+        using var dialog = new FolderBrowserDialog { SelectedPath = target.Text };
+        if (dialog.ShowDialog(this) == DialogResult.OK) target.Text = dialog.SelectedPath;
+    }
+
+    private void Server_ClientConnected(object? sender, string endpoint) => OnUi(() =>
+    {
+        labelConnectionState.Text = $"客户端已连接：{endpoint}";
+        UpdateManualButtonState();
+        AppendLog($"TCP 客户端已连接：{endpoint}");
+    });
+    private void Server_MessageSent(object? sender, string message) => OnUi(() => AppendLog($"发送：{message}"));
+    private void Server_MessageReceived(object? sender, string message) => OnUi(() => AppendLog($"收到：{message}"));
+    private void Server_ConnectionClosed(object? sender, string reason) => OnUi(() =>
+    {
+        labelConnectionState.Text = _server.IsListening ? "监听中，等待客户端" : "未监听";
+        UpdateManualButtonState();
+        AppendLog($"TCP 客户端断开：{reason}");
+    });
+    private void Server_ProtocolError(object? sender, Exception ex) => OnUi(() => AppendLog($"协议错误：{ex.Message}"));
+
+    private void Monitor_DialogDetected(object? sender, MrTestDialogDetectedEventArgs dialog)
+    {
+        AppendLog($"发现 MRTEST 弹窗：0x{dialog.Handle.ToInt64():X}（{dialog.Title}）");
+
+        // 一键测试进行中，固定图卡协调器是唯一消费者；空闲时自动处理
+        // MRTEST 的残留/连接错误对话框，确保下一次 TCP 连接不会被阻塞。
+        if (_closing || _planRunning || _runTask is { IsCompleted: false }) return;
+        lock (_idleDialogGate)
+        {
+            if (!_idleDialogConfirming.Add(dialog.Handle)) return;
+        }
+        _ = ConfirmIdleDialogAsync(dialog);
+    }
+
+    private async Task ConfirmIdleDialogAsync(MrTestDialogDetectedEventArgs dialog)
+    {
+        try
+        {
+            await _monitor.ConfirmOkAsync(dialog.Handle).ConfigureAwait(false);
+            AppendLog($"空闲状态已自动确认 MRTEST 弹窗：0x{dialog.Handle.ToInt64():X}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"空闲状态自动确认 MRTEST 弹窗失败：{ex.Message}");
+        }
+        finally
+        {
+            lock (_idleDialogGate) _idleDialogConfirming.Remove(dialog.Handle);
+        }
+    }
+
+    private void DashboardForm_FormClosing(object? sender, FormClosingEventArgs e)
+    {
+        if (IsInDesigner()) return;
+        if (_closing) return;
+        _closing = true;
+        try
+        {
+            ReadConfigurationFromControls(); _settingsStore.Save(_configuration);
+            _runner?.Cancel();
+            try { _runTask?.GetAwaiter().GetResult(); } catch { }
+            _monitor.StopAsync().GetAwaiter().GetResult();
+            _server.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            _projector.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            _runner?.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            _monitor.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        }
+        catch (Exception ex) { AppendLog($"关闭时释放资源失败：{ex.Message}"); }
+    }
+
+    private void SetRunningUi(bool running)
+    {
+        _planRunning = running;
+        buttonStart.Enabled = !running && !_manualSendInProgress;
+        buttonStop.Enabled = running; buttonRecipeManager.Enabled = !running; buttonListen.Enabled = !running;
+        UpdateManualButtonState();
+        buttonViewCrosstalk.Enabled = !running && _lastCrosstalkResult?.HeatmapPath is string path && File.Exists(path);
+        labelProgress.Text = running ? "正在执行..." : "等待开始";
+    }
+
+    private void UpdateManualButtonState()
+    {
+        if (IsDisposed || Disposing) return;
+        if (!_planRunning)
+            buttonStart.Enabled = !_manualSendInProgress && !_closing;
+        buttonSendManual.Enabled = !_manualSendInProgress && !_planRunning && !_closing &&
+            _server.IsListening && _server.IsConnected;
+    }
+
+    private void OnUi(Action action)
+    {
+        if (IsDisposed || Disposing) return;
+        try { if (InvokeRequired) BeginInvoke(action); else action(); } catch (InvalidOperationException) { }
+    }
+
+    private void AppendLog(string message)
+    {
+        OnUi(() =>
+        {
+            string line = $"[{DateTime.Now:HH:mm:ss}] {message}";
+            textBoxLog.AppendText(line + Environment.NewLine);
+            textBoxLog.SelectionStart = textBoxLog.TextLength; textBoxLog.ScrollToCaret();
+        });
+    }
+
+    private static bool TryResolveAddress(string text, out IPAddress? address, out string error)
+    {
+        if (IPAddress.TryParse(text, out address)) { error = string.Empty; return true; }
+        try
+        {
+            address = Dns.GetHostAddresses(text).FirstOrDefault(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+            if (address is not null) { error = string.Empty; return true; }
+        }
+        catch (Exception ex) { error = $"监听地址解析失败：{ex.Message}"; return false; }
+        error = "请输入有效的 IPv4 地址或主机名。"; return false;
+    }
+
+    private bool IsInDesigner() => LicenseManager.UsageMode == LicenseUsageMode.Designtime || DesignMode;
+
+    private void textBoxLog_TextChanged(object sender, EventArgs e)
+    {
+
+    }
+
+    private void resultSplit_Panel1_Paint(object sender, PaintEventArgs e)
+    {
+
+    }
+
+    private void rootLayout_Paint(object sender, PaintEventArgs e)
+    {
+
+    }
+
+    private void textBoxManualCommand_TextChanged(object sender, EventArgs e)
+    {
+
+    }
+}

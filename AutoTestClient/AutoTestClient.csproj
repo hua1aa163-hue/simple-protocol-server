@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <!-- The WinForms designer is DPI-unaware.  Keep the designer at its
+         96-DPI coordinate system on a 150% monitor so the design surface does
+         not shrink the form into a tiny upper-left preview.  This affects the
+         designer only; the application keeps its normal runtime DPI behavior. -->
+    <ForceDesignerDPIUnaware>true</ForceDesignerDPIUnaware>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseSystemDrawing>true</UseSystemDrawing>
+    <AssemblyName>AutoTestClient</AssemblyName>
+    <RootNamespace>AutoTestClient</RootNamespace>
+    <Version>0.1.0</Version>
+    <AssemblyTitle>一键光学测试客户端</AssemblyTitle>
+    <Product>一键光学测试客户端</Product>
+    <Platforms>AnyCPU;x64</Platforms>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <LangVersion>latest</LangVersion>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <!-- Keep the forms/nested designer files visible to the Visual Studio
+       WinForms project system when the SDK-style project is opened. -->
+  <ItemGroup>
+    <Compile Update="DashboardForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="DashboardForm.Designer.cs">
+      <DependentUpon>DashboardForm.cs</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+    <EmbeddedResource Update="DashboardForm.resx">
+      <DependentUpon>DashboardForm.cs</DependentUpon>
+    </EmbeddedResource>
+
+    <Compile Update="RecipeManagerForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="RecipeManagerForm.Designer.cs">
+      <DependentUpon>RecipeManagerForm.cs</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+    <EmbeddedResource Update="RecipeManagerForm.resx">
+      <DependentUpon>RecipeManagerForm.cs</DependentUpon>
+    </EmbeddedResource>
+
+    <Compile Update="CrosstalkResultForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="CrosstalkResultForm.Designer.cs">
+      <DependentUpon>CrosstalkResultForm.cs</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+    <EmbeddedResource Update="CrosstalkResultForm.resx">
+      <DependentUpon>CrosstalkResultForm.cs</DependentUpon>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>

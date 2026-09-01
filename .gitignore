@@ -1,0 +1,14 @@
+**/bin/
+**/obj/
+publish/
+.vs/
+*.user
+BuildCheck*/
+BuildReview/
+UiBuild/
+UiHarnessBuild/
+UiLayoutCaptures/
+UiLayoutHarness/
+TestResults/
+*.backup
+/In_EF_Filter_log.txt
