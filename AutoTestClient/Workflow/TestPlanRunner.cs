@@ -158,7 +158,16 @@ public sealed class TestPlanRunner : IAsyncDisposable
             // 监视器只能记录窗口而没有消费者，测试会卡在该弹窗上。
             // 将这两类配方视为隐式弹窗项目，使用同一固定图卡队列，
             // 不改变用户在界面中编辑/保存的 PopupDriven 字段。
-            if (RequiresMrTestPopupSequence(project))
+            // 串扰的“弹窗序列”与 FOV/对比度/色域的序列语义不同：
+            // 每一张图卡都是一次独立的测量事务，必须在收到该张图的
+            // 最终 OK 后才能进入下一张。因此先分流到逐图实现，不能
+            // 让它落入“一次命令消费整条队列”的普通弹窗流程。
+            if (project.Kind == TestProjectKind.Crosstalk && project.PopupDriven)
+            {
+                await RunCrosstalkPopupProjectAsync(configuration, project, round, iteration, records, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else if (RequiresMrTestPopupSequence(project))
             {
                 if (!project.PopupDriven)
                     await _log($"项目“{project.Name}”按 MRTEST 9Point 配方自动使用弹窗图卡序列。").ConfigureAwait(false);
@@ -249,6 +258,239 @@ public sealed class TestPlanRunner : IAsyncDisposable
             records.Add(new TestMeasurementRecord(++sequence, project.Name, imagePath, completed));
             await _log($"串扰图卡 {sequence}/{ordered.Count} 完成：{step.DisplayName}").ConfigureAwait(false);
             if (sequence < ordered.Count) await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// 串扰弹窗模式：每张图卡对应一条独立的测量命令。
+    /// <para>
+    /// 设备事务严格按“投图 → Arm 弹窗监视 → 发送请求 → 忽略 Run 中间态、
+    /// 确认/关闭该张弹窗 → 等待最终 OK → 下一张”推进。监视器在一张图的
+    /// 命令事务窗口内运行，并在进入下一张前停止，避免残留弹窗跨事务消费。
+    /// </para>
+    /// </summary>
+    private async Task RunCrosstalkPopupProjectAsync(
+        TestPlanConfiguration configuration,
+        TestProject project,
+        int round,
+        int iteration,
+        List<TestMeasurementRecord> records,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyList<TestStep> ordered = OrderCrosstalkSteps(project.Steps, project.CrosstalkStartIndex);
+        if (ordered.Count < 3 || ordered.Count % 2 == 0)
+            throw new InvalidDataException("串扰图卡数量必须为大于等于 3 的奇数，且最后一张为本底图。");
+
+        TimeSpan popupTimeout = TimeSpan.FromSeconds(Math.Clamp(project.PopupTimeoutSeconds, 1, 600));
+        int sequence = 0;
+        await _log($"串扰已启用弹窗序列：每张图卡独立发送测量并等待最终 OK（最长 {popupTimeout.TotalSeconds:0} 秒）。")
+            .ConfigureAwait(false);
+
+        foreach (TestStep sourceStep in ordered)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string imagePath = sourceStep.ResolveImagePath(configuration.ImageDirectory);
+            if (string.IsNullOrWhiteSpace(imagePath))
+                throw new InvalidDataException($"串扰第 {sequence + 1} 张图卡路径为空。");
+
+            int position = sequence + 1;
+            await _log($"串扰图卡 {position}/{ordered.Count}：开始投图：{sourceStep.DisplayName}")
+                .ConfigureAwait(false);
+            await _projector.ProjectAsync(imagePath, configuration.ProjectionMode, cancellationToken)
+                .ConfigureAwait(false);
+            await DelayAsync(sourceStep.StabilizeDelayMs, cancellationToken).ConfigureAwait(false);
+            await _log($"串扰图卡 {position}/{ordered.Count}：图卡已切换：{imagePath}")
+                .ConfigureAwait(false);
+
+            // 监视器必须在发送前启动并且协调器必须先 Arm，避免 MRTEST
+            // 在发送后立即弹窗时事件先于订阅而丢失。普通弹窗项目仍走
+            // RunPopupProjectAsync，不受此逐图分支影响。
+            await StartDialogMonitoringAsync(configuration).ConfigureAwait(false);
+            try
+            {
+                string request = NormalizeRequest(sourceStep.MeasurementRequest);
+                using var popupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                var runReceived = new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var finalResponseAtUtc = new TaskCompletionSource<DateTime>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                // Link the intermediate-state gate to the transaction token.
+                // On timeout, disconnect, stop, or cancellation there may be
+                // no future Run packet; canceling this TCS keeps the failure
+                // path from waiting forever for an impossible event.
+                using CancellationTokenRegistration stageCancellation =
+                    popupCancellation.Token.Register(() =>
+                    {
+                        runReceived.TrySetCanceled(popupCancellation.Token);
+                        finalResponseAtUtc.TrySetCanceled(popupCancellation.Token);
+                    });
+                bool transactionArmed = false;
+                EventHandler<string>? stageObserver = null;
+                stageObserver = (_, response) =>
+                {
+                    // The server serializes request/response transactions, but
+                    // keep an explicit arm flag so a queued packet from the
+                    // previous transaction cannot satisfy this image's gate.
+                    if (!Volatile.Read(ref transactionArmed)) return;
+                    if (CommandResponseMatcher.IsIntermediate(request, response))
+                    {
+                        if (runReceived.TrySetResult(true))
+                            _ = _log($"串扰图卡 {position}/{ordered.Count}：收到 Run 中间返回：{response}");
+                    }
+                    else if (CommandResponseMatcher.Classify(request, response) == ResponseClassification.Success)
+                    {
+                        finalResponseAtUtc.TrySetResult(DateTime.UtcNow);
+                    }
+                };
+                _server.MessageReceived += stageObserver;
+                try
+                {
+                    await using var coordinator = new FixedPopupSequenceCoordinator(
+                        _monitor,
+                        _projector,
+                        _log,
+                        configuration.ProjectionMode,
+                        popupTimeout,
+                        projectOnDialog: false,
+                        beforeConfirm: configuration.AutoConfirmPopups
+                            ? token => runReceived.Task.WaitAsync(token)
+                            : null);
+
+                    // 图卡已经在发送前投影；协调器只负责消费一个弹窗并执行
+                    // 确定/Enter/关闭回退，不再次切换屏幕内容。
+                    var popupStep = new TestStep
+                    {
+                        Order = sourceStep.Order,
+                        Name = sourceStep.Name,
+                        ImagePath = imagePath,
+                        StabilizeDelayMs = 0,
+                        MeasurementRequest = sourceStep.MeasurementRequest
+                    };
+                    coordinator.Arm(new[] { popupStep }, configuration.AutoConfirmPopups, popupCancellation.Token);
+
+                    await _log($"串扰图卡 {position}/{ordered.Count}：发送测量：{request}；等待 Run/弹窗确认/最终 OK")
+                        .ConfigureAwait(false);
+                    // Arm the stage observer immediately before the send.  It is
+                    // already subscribed, so a very fast Run/OK response cannot
+                    // race subscription; the flag still rejects pre-send noise.
+                    Volatile.Write(ref transactionArmed, true);
+                    Task<string> responseTask = _server.SendAndWaitForCompletionAsync(
+                        request, popupTimeout, popupCancellation.Token);
+                    Task popupTask = coordinator.Completion;
+                    DateTime completedUtc = await AwaitCrosstalkPopupAndResponseAsync(
+                        responseTask,
+                        popupTask,
+                        configuration.AutoConfirmPopups
+                            ? runReceived.Task
+                            : null,
+                        finalResponseAtUtc.Task,
+                        popupTimeout,
+                        popupCancellation,
+                        coordinator,
+                        position,
+                        ordered.Count).ConfigureAwait(false);
+
+                    records.Add(new TestMeasurementRecord(++sequence, project.Name, imagePath, completedUtc));
+                    await _log($"串扰图卡 {position}/{ordered.Count}：已收到最终 OK（{completedUtc.ToLocalTime():HH:mm:ss.fff}），进入下一张。")
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    // Always detach the per-transaction observer, including
+                    // validation/send/timeout failures; otherwise a later
+                    // image could consume an old closure and leak handlers.
+                    Volatile.Write(ref transactionArmed, false);
+                    _server.MessageReceived -= stageObserver;
+                }
+            }
+            finally
+            {
+                // StopAsync 会等待轮询任务退出并清除已见句柄；这一步放在
+                // 每个命令事务末尾，防止上一张弹窗影响下一张图卡。
+                await StopDialogMonitoringAsync(logWhenStopped: true).ConfigureAwait(false);
+            }
+
+            if (sequence < ordered.Count)
+                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+        }
+
+        await _log($"串扰弹窗序列完成：{ordered.Count} 张图卡均已收到最终 OK。")
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<DateTime> AwaitCrosstalkPopupAndResponseAsync(
+        Task<string> responseTask,
+        Task popupTask,
+        Task? runTask,
+        Task<DateTime> finalResponseAtUtc,
+        TimeSpan timeout,
+        CancellationTokenSource popupCancellation,
+        FixedPopupSequenceCoordinator coordinator,
+        int position,
+        int total)
+    {
+        using var timeoutCancellation = new CancellationTokenSource();
+        Task timeoutTask = Task.Delay(timeout, timeoutCancellation.Token);
+        // Manual-confirm mode deliberately has no Run gate.  Do not put a
+        // pre-completed placeholder task into WhenAny: it would win every
+        // iteration and turn the wait into a tight CPU loop until another
+        // task happens to complete.  The wait set is therefore built per
+        // mode, while the success check below uses the same requirement.
+        bool runRequired = runTask is not null;
+        try
+        {
+            while (true)
+            {
+                Task completed = runRequired
+                    ? await Task.WhenAny(responseTask, popupTask, runTask!, timeoutTask).ConfigureAwait(false)
+                    : await Task.WhenAny(responseTask, popupTask, timeoutTask).ConfigureAwait(false);
+                if (ReferenceEquals(completed, timeoutTask))
+                {
+                    string pendingDescription = runRequired
+                        ? "Run、弹窗确认和最终 OK"
+                        : "弹窗关闭和最终 OK";
+                    throw new TimeoutException(
+                        $"串扰第 {position}/{total} 张图卡在 {timeout.TotalSeconds:0} 秒内未完成{pendingDescription}。");
+                }
+
+                // 传播任一事务的失败/取消，并主动取消另一侧，避免
+                // 响应失败后仍无限等待一个永远不会出现的弹窗。
+                if (completed.IsFaulted || completed.IsCanceled)
+                    await completed.ConfigureAwait(false);
+
+                if (responseTask.IsCompletedSuccessfully && popupTask.IsCompletedSuccessfully &&
+                    (!runRequired || runTask!.IsCompletedSuccessfully))
+                {
+                    await responseTask.ConfigureAwait(false);
+                    await popupTask.ConfigureAwait(false);
+                    if (runRequired) await runTask!.ConfigureAwait(false);
+                    // The observer normally captures the exact receive time.
+                    // Keep a defensive fallback for a custom server that
+                    // completes its task without raising MessageReceived.
+                    return finalResponseAtUtc.IsCompletedSuccessfully
+                        ? await finalResponseAtUtc.ConfigureAwait(false)
+                        : DateTime.UtcNow;
+                }
+            }
+        }
+        catch
+        {
+            popupCancellation.Cancel();
+            coordinator.Fail(new InvalidOperationException(
+                $"串扰第 {position}/{total} 张图卡的弹窗/测量事务未完成。"));
+            try
+            {
+                if (runRequired)
+                    await Task.WhenAll(responseTask, popupTask, runTask!).ConfigureAwait(false);
+                else
+                    await Task.WhenAll(responseTask, popupTask).ConfigureAwait(false);
+            }
+            catch { /* 保留最先发生的原始异常。 */ }
+            throw;
+        }
+        finally
+        {
+            timeoutCancellation.Cancel();
         }
     }
 
@@ -366,8 +608,6 @@ public sealed class TestPlanRunner : IAsyncDisposable
             if (project.Kind == TestProjectKind.Crosstalk &&
                 (imageStepCount < 3 || imageStepCount % 2 == 0))
                 errors.Add($"{project.Name}：串扰图卡必须是大于等于 3 的奇数。");
-            if (project.Kind == TestProjectKind.Crosstalk && project.PopupDriven)
-                errors.Add($"{project.Name}：串扰项目使用多图逐张确认流程，不能启用弹窗序列模式。");
             if (RequiresMrTestPopupSequence(project) && project.Steps.Count == 0)
                 errors.Add($"{project.Name}：弹窗项目没有固定图卡。");
             foreach (TestStep step in project.Steps)

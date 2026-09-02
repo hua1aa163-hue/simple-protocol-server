@@ -51,6 +51,11 @@ public static class CrosstalkDataProcessor
 
     private static readonly TimeSpan ExportWaitTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ExportPollInterval = TimeSpan.FromMilliseconds(500);
+    // A plan normally serializes iterations, but callers can process two
+    // completed batches concurrently (for example when a UI queues results).
+    // Reserve result directories under one process-wide lock so two batches
+    // started in the same second can never select the same suffix.
+    private static readonly object OutputDirectoryGate = new();
 
     /// <summary>
     /// 只记录所选根目录的一级子文件夹，因为 MATLAB 也是遍历 selectedFolder 的一级子文件夹，
@@ -413,14 +418,17 @@ public static class CrosstalkDataProcessor
         DateTime testStartedUtc,
         int testCount)
     {
-        string baseName = $"串扰测试_{testStartedUtc.ToLocalTime():yyyyMMdd_HHmmss}_{testCount}次";
-        for (int suffix = 0; ; suffix++)
+        lock (OutputDirectoryGate)
         {
-            string name = suffix == 0 ? baseName : $"{baseName}_{suffix}";
-            string path = Path.Combine(outputRoot, name);
-            if (Directory.Exists(path)) continue;
-            Directory.CreateDirectory(path);
-            return path;
+            string baseName = $"串扰测试_{testStartedUtc.ToLocalTime():yyyyMMdd_HHmmss}_{testCount}次";
+            for (int suffix = 0; ; suffix++)
+            {
+                string name = suffix == 0 ? baseName : $"{baseName}_{suffix}";
+                string path = Path.Combine(outputRoot, name);
+                if (Directory.Exists(path)) continue;
+                Directory.CreateDirectory(path);
+                return path;
+            }
         }
     }
 

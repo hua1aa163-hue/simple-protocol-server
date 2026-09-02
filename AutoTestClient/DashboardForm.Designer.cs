@@ -52,6 +52,7 @@ namespace AutoTestClient
         private Button buttonSendManual;
         private Button buttonClearLog;
         private Button buttonViewCrosstalk;
+        private ComboBox comboCrosstalkResults;
         private Button buttonBrowseMrTest;
         private Button buttonBrowseExport;
         private Button buttonBrowseRecipe;
@@ -119,6 +120,7 @@ namespace AutoTestClient
             manualTable = new TableLayoutPanel();
             labelManualCommand = new Label();
             buttonViewCrosstalk = new Button();
+            comboCrosstalkResults = new ComboBox();
             buttonSendManual = new Button();
             buttonClearLog = new Button();
             textBoxManualCommand = new TextBox();
@@ -622,14 +624,16 @@ namespace AutoTestClient
             // 
             // manualTable
             // 
-            manualTable.ColumnCount = 5;
+            manualTable.ColumnCount = 6;
             manualTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 69F));
             manualTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             manualTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 109F));
             manualTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 191F));
+            manualTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220F));
             manualTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 144F));
             manualTable.Controls.Add(labelManualCommand, 0, 0);
-            manualTable.Controls.Add(buttonViewCrosstalk, 4, 0);
+            manualTable.Controls.Add(comboCrosstalkResults, 4, 0);
+            manualTable.Controls.Add(buttonViewCrosstalk, 5, 0);
             manualTable.Controls.Add(buttonSendManual, 2, 0);
             manualTable.Controls.Add(buttonClearLog, 3, 0);
             manualTable.Controls.Add(textBoxManualCommand, 1, 0);
@@ -652,15 +656,30 @@ namespace AutoTestClient
             labelManualCommand.Size = new Size(56, 17);
             labelManualCommand.TabIndex = 0;
             labelManualCommand.Text = "发送报文";
-            // 
+            //
+            // comboCrosstalkResults
+            //
+            comboCrosstalkResults.Dock = DockStyle.Fill;
+            comboCrosstalkResults.DropDownStyle = ComboBoxStyle.DropDownList;
+            comboCrosstalkResults.Enabled = false;
+            comboCrosstalkResults.FormattingEnabled = true;
+            comboCrosstalkResults.Location = new Point(1014, 10);
+            comboCrosstalkResults.Name = "comboCrosstalkResults";
+            comboCrosstalkResults.Size = new Size(220, 25);
+            comboCrosstalkResults.TabIndex = 4;
+            comboCrosstalkResults.Text = "选择串扰结果（暂无）";
+            comboCrosstalkResults.SelectedIndexChanged += ComboCrosstalkResults_SelectedIndexChanged;
+            //
             // buttonViewCrosstalk
-            // 
+            //
             buttonViewCrosstalk.Enabled = false;
+            buttonViewCrosstalk.Dock = DockStyle.Fill;
             buttonViewCrosstalk.Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Regular, GraphicsUnit.Point, 134);
-            buttonViewCrosstalk.Location = new Point(1095, 10);
+            buttonViewCrosstalk.Location = new Point(1234, 10);
+            buttonViewCrosstalk.Margin = new Padding(3);
             buttonViewCrosstalk.Name = "buttonViewCrosstalk";
             buttonViewCrosstalk.Size = new Size(138, 33);
-            buttonViewCrosstalk.TabIndex = 4;
+            buttonViewCrosstalk.TabIndex = 5;
             buttonViewCrosstalk.Text = "查看串扰热图";
             buttonViewCrosstalk.UseVisualStyleBackColor = true;
             buttonViewCrosstalk.Click += ButtonViewCrosstalk_Click;
@@ -687,9 +706,10 @@ namespace AutoTestClient
             // 
             // textBoxManualCommand
             // 
-            textBoxManualCommand.Anchor = AnchorStyles.None;
+            textBoxManualCommand.Dock = DockStyle.Fill;
             textBoxManualCommand.Location = new Point(82, 15);
             textBoxManualCommand.Name = "textBoxManualCommand";
+            textBoxManualCommand.Margin = new Padding(3, 4, 3, 4);
             textBoxManualCommand.Size = new Size(704, 23);
             textBoxManualCommand.TabIndex = 1;
             textBoxManualCommand.Text = "&|Meas|A|M|@";

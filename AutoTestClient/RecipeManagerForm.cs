@@ -20,6 +20,10 @@ public partial class RecipeManagerForm : Form
     private TestProject? _boundProject;
     private bool _cancelRequested;
     private bool _updatingBindingUi;
+    // DataGridView raises SelectionChanged several times while its DataSource
+    // is being detached/attached.  Keep the editor update atomic so a stale
+    // row index cannot be used while the grid is in that transient state.
+    private bool _rebindingGrids;
     private List<string> _availableImageFiles = new();
     private string _availableImageDirectory = string.Empty;
     public TestPlanConfiguration Configuration { get; private set; }
@@ -64,7 +68,10 @@ public partial class RecipeManagerForm : Form
         // gridSteps 的事件由代码挂接，避免设计器保存时遗漏；绑定面板的
         // 事件由 Designer.cs 挂接，便于在 Visual Studio 设计器中查看和调整。
         if (gridSteps is not null)
+        {
             gridSteps.SelectionChanged += GridSteps_SelectionChanged;
+            gridSteps.CellEndEdit += GridSteps_CellEndEdit;
+        }
         if (gridProjects is not null)
             gridProjects.CellEndEdit += GridProjects_CellEndEdit;
         if (_isDesignTime)
@@ -81,41 +88,101 @@ public partial class RecipeManagerForm : Form
         }
     }
 
-    private void BindProjects()
+    private void BindProjects(int preferredIndex = -1)
     {
-        CommitBindingEdits();
-        CommitStepGrid(_boundProject);
-        Configuration.Normalize();
-        // Existing plans created before the binding panel may have a recipe
-        // file path but no protocol name.  Fill only that missing default on
-        // load; a non-empty name may be an intentional MRTEST override and is
-        // therefore preserved until the user chooses a different file.
-        foreach (TestProject project in Configuration.Projects)
+        if (_isDesignTime || _rebindingGrids) return;
+
+        _rebindingGrids = true;
+        try
         {
-            if (string.IsNullOrWhiteSpace(project.RecipeName) &&
-                !string.IsNullOrWhiteSpace(project.RecipeFilePath))
+            CommitBindingEdits();
+            CommitStepGrid(_boundProject);
+            CommitProjectGrid();
+            Configuration.Normalize();
+
+            // Existing plans created before the binding panel may have a recipe
+            // file path but no protocol name.  Fill only that missing default on
+            // load; a non-empty name may be an intentional MRTEST override and is
+            // therefore preserved until the user chooses a different file.
+            foreach (TestProject project in Configuration.Projects)
             {
-                ApplyRecipeNameFromFile(project, project.RecipeFilePath);
+                if (string.IsNullOrWhiteSpace(project.RecipeName) &&
+                    !string.IsNullOrWhiteSpace(project.RecipeFilePath))
+                {
+                    ApplyRecipeNameFromFile(project, project.RecipeFilePath);
+                }
             }
+
+            // A List<T> does not notify DataGridView when an item is removed.
+            // Detach and attach while the rebind guard is held; otherwise the
+            // intermediate SelectionChanged events can read a row index that no
+            // longer exists and overwrite the wrong project's image path.
+            gridSteps.DataSource = null;
+            gridProjects.DataSource = null;
+            gridProjects.DataSource = Configuration.Projects;
+
+            int selectedIndex = ResolveProjectSelectionIndex(preferredIndex);
+            if (selectedIndex >= 0 && selectedIndex < gridProjects.Rows.Count &&
+                gridProjects.Columns.Count > 0)
+            {
+                gridProjects.CurrentCell = gridProjects.Rows[selectedIndex].Cells[0];
+                gridProjects.Rows[selectedIndex].Selected = true;
+                Configuration.SelectedProjectIndex = selectedIndex;
+            }
+            else
+            {
+                Configuration.SelectedProjectIndex = 0;
+            }
+
+            // SelectionChanged is intentionally ignored while the grids are
+            // being rebuilt; perform one deterministic bind after both sources
+            // are ready.
+            BindSelectedStepsCore(commitEdits: false);
         }
-        gridProjects.DataSource = null;
-        gridProjects.DataSource = Configuration.Projects;
-        if (gridProjects.Rows.Count > 0)
+        finally
         {
-            gridProjects.CurrentCell = gridProjects.Rows[0].Cells[0];
-            gridProjects.Rows[0].Selected = true;
+            _rebindingGrids = false;
         }
-        BindSelectedSteps();
+    }
+
+    private int ResolveProjectSelectionIndex(int preferredIndex)
+    {
+        if (gridProjects.Rows.Count == 0 || Configuration.Projects.Count == 0)
+            return -1;
+
+        int candidate = preferredIndex >= 0
+            ? preferredIndex
+            : Configuration.SelectedProjectIndex;
+        return Math.Clamp(candidate, 0, Math.Min(gridProjects.Rows.Count, Configuration.Projects.Count) - 1);
     }
 
     private void BindSelectedSteps()
     {
-        if (_isDesignTime) return;
-        CommitBindingEdits();
-        CommitStepGrid(_boundProject);
-        CommitProjectGrid();
-        _boundProject = gridProjects.CurrentRow?.DataBoundItem as TestProject;
-        if (_boundProject is null)
+        if (_isDesignTime || _rebindingGrids) return;
+
+        _rebindingGrids = true;
+        try
+        {
+            BindSelectedStepsCore(commitEdits: true);
+        }
+        finally
+        {
+            _rebindingGrids = false;
+        }
+    }
+
+    private void BindSelectedStepsCore(bool commitEdits)
+    {
+        if (commitEdits)
+        {
+            CommitBindingEdits();
+            CommitStepGrid(_boundProject);
+            CommitProjectGrid();
+        }
+
+        TestProject? selectedProject = GetSelectedProject();
+        _boundProject = selectedProject;
+        if (selectedProject is null)
         {
             gridSteps.DataSource = null;
             ShowSelectedBindings();
@@ -123,7 +190,7 @@ public partial class RecipeManagerForm : Form
         }
 
         gridSteps.DataSource = null;
-        gridSteps.DataSource = _boundProject.Steps;
+        gridSteps.DataSource = selectedProject.Steps;
         if (gridSteps.Rows.Count > 0)
         {
             gridSteps.CurrentCell = gridSteps.Rows[0].Cells[0];
@@ -132,7 +199,17 @@ public partial class RecipeManagerForm : Form
         ShowSelectedBindings();
     }
 
-    private void GridProjects_SelectionChanged(object? sender, EventArgs e) => BindSelectedSteps();
+    private void GridProjects_SelectionChanged(object? sender, EventArgs e)
+    {
+        if (_rebindingGrids) return;
+        TestProject? selected = GetSelectedProject();
+        int selectedIndex = selected is null ? -1 : Configuration.Projects.IndexOf(selected);
+        if (selectedIndex >= 0)
+        {
+            Configuration.SelectedProjectIndex = selectedIndex;
+        }
+        BindSelectedSteps();
+    }
 
     /// <summary>
     /// 直接编辑项目表中的“配方文件(可选)”时，立即把 MRTEST 配方名
@@ -142,11 +219,14 @@ public partial class RecipeManagerForm : Form
     /// </summary>
     private void GridProjects_CellEndEdit(object? sender, DataGridViewCellEventArgs e)
     {
-        if (_isDesignTime || e.RowIndex < 0 || e.RowIndex >= gridProjects.Rows.Count)
+        if (_isDesignTime || _rebindingGrids || e.RowIndex < 0 ||
+            e.RowIndex >= gridProjects.Rows.Count || e.ColumnIndex < 0 ||
+            e.ColumnIndex >= gridProjects.Columns.Count)
             return;
 
         DataGridViewRow row = gridProjects.Rows[e.RowIndex];
-        if (row.DataBoundItem is not TestProject project)
+        if (row.DataBoundItem is not TestProject project ||
+            !Configuration.Projects.Contains(project))
             return;
 
         string columnName = gridProjects.Columns[e.ColumnIndex].Name;
@@ -178,8 +258,36 @@ public partial class RecipeManagerForm : Form
 
     private void GridSteps_SelectionChanged(object? sender, EventArgs e)
     {
-        if (_isDesignTime || _updatingBindingUi) return;
+        if (_isDesignTime || _updatingBindingUi || _rebindingGrids) return;
+        // Commit direct grid edits before refreshing the binding panel.  This
+        // makes the path label/preview deterministic even when the click that
+        // selects a row also ends an edit in the previous row.
+        CommitStepGrid(_boundProject);
         ShowSelectedBindings();
+    }
+
+    private void GridSteps_CellEndEdit(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (_isDesignTime || _rebindingGrids || e.RowIndex < 0 ||
+            e.RowIndex >= gridSteps.Rows.Count || e.ColumnIndex < 0 ||
+            e.ColumnIndex >= gridSteps.Columns.Count)
+            return;
+
+        DataGridViewRow row = gridSteps.Rows[e.RowIndex];
+        if (row.DataBoundItem is not TestStep step ||
+            _boundProject is null || !_boundProject.Steps.Contains(step)) return;
+
+        // DataGridView is bound to List<T>; explicitly copy the edited path so
+        // the model, the lower-left grid cell, and the right preview all share
+        // the same value without relying on a binding notification.
+        step.ImagePath = CellText(row, "ImagePath", step.ImagePath).Trim();
+        UpdateStepGridRow(step);
+        if (ReferenceEquals(GetSelectedStep(), step))
+        {
+            SetBindingLabels(_boundProject, step);
+            ShowImagePreview(step.ImagePath);
+            RefreshBindingChoices();
+        }
     }
 
     #region 配方/图卡选择绑定与预览
@@ -240,6 +348,13 @@ public partial class RecipeManagerForm : Form
     private void CommitBindingEdits()
     {
         if (_isDesignTime) return;
+
+        // Finish an in-place grid edit before reading the side-panel controls.
+        // Without this ordering, a user who types a path in the lower grid and
+        // immediately presses Save/Choose can have the still-selected (old)
+        // combo-box item write the old path back over the new cell value.
+        CommitProjectGrid();
+        CommitStepGrid(_boundProject);
 
         TestProject? project = _boundProject;
         if (project is not null)
@@ -566,8 +681,35 @@ public partial class RecipeManagerForm : Form
         previous?.Dispose();
     }
 
-    private TestStep? GetSelectedStep() =>
-        gridSteps?.CurrentRow?.DataBoundItem as TestStep;
+    private TestProject? GetSelectedProject()
+    {
+        if (gridProjects is null) return null;
+        if (gridProjects.CurrentRow?.DataBoundItem is TestProject current)
+            return current;
+
+        // During a DataSource transition CurrentRow can briefly be null while
+        // SelectedRows still contains the valid bound item.  Prefer the object
+        // itself over a display index in that case.
+        foreach (DataGridViewRow row in gridProjects.SelectedRows)
+        {
+            if (row.DataBoundItem is TestProject project)
+                return project;
+        }
+        return null;
+    }
+
+    private TestStep? GetSelectedStep()
+    {
+        if (gridSteps is null) return null;
+        if (gridSteps.CurrentRow?.DataBoundItem is TestStep current)
+            return current;
+        foreach (DataGridViewRow row in gridSteps.SelectedRows)
+        {
+            if (row.DataBoundItem is TestStep step)
+                return step;
+        }
+        return null;
+    }
 
     private void UpdateProjectGridRow(TestProject project)
     {
@@ -575,10 +717,12 @@ public partial class RecipeManagerForm : Form
         foreach (DataGridViewRow row in gridProjects.Rows)
         {
             if (!ReferenceEquals(row.DataBoundItem, project)) continue;
-            if (gridProjects.Columns.Contains("RecipeName"))
+            if (row.IsNewRow) continue;
+            if (gridProjects.Columns.Contains("RecipeName") && row.Cells.Count > 0)
                 row.Cells["RecipeName"].Value = project.RecipeName;
             if (gridProjects.Columns.Contains("RecipeFilePath"))
                 row.Cells["RecipeFilePath"].Value = project.RecipeFilePath;
+            if (row.Index >= 0) gridProjects.InvalidateRow(row.Index);
             break;
         }
     }
@@ -589,8 +733,10 @@ public partial class RecipeManagerForm : Form
         foreach (DataGridViewRow row in gridSteps.Rows)
         {
             if (!ReferenceEquals(row.DataBoundItem, step)) continue;
+            if (row.IsNewRow) continue;
             if (gridSteps.Columns.Contains("ImagePath"))
                 row.Cells["ImagePath"].Value = step.ImagePath;
+            if (row.Index >= 0) gridSteps.InvalidateRow(row.Index);
             break;
         }
     }
@@ -691,6 +837,23 @@ public partial class RecipeManagerForm : Form
         return directory.Length == 0 ? file : $"{directory}\\{file}";
     }
 
+    private static void ReindexProjects(IList<TestProject> projects)
+    {
+        for (int index = 0; index < projects.Count; index++)
+        {
+            TestProject project = projects[index];
+            project.Order = index + 1;
+            ReindexSteps(project.Steps);
+        }
+    }
+
+    private static void ReindexSteps(IList<TestStep>? steps)
+    {
+        if (steps is null) return;
+        for (int index = 0; index < steps.Count; index++)
+            steps[index].Order = index + 1;
+    }
+
     private void AppendBindingLog(string message)
     {
         if (_isDesignTime) return;
@@ -707,21 +870,47 @@ public partial class RecipeManagerForm : Form
         CommitBindingEdits(); CommitStepGrid(_boundProject); CommitProjectGrid();
         int order = Configuration.Projects.Count == 0 ? 1 : Configuration.Projects.Max(p => p.Order) + 1;
         Configuration.Projects.Add(new TestProject { Order = order, Name = "新测试项目", Kind = TestProjectKind.Generic, RepeatCount = 1, Steps = new() });
-        BindProjects(); gridProjects.CurrentCell = gridProjects.Rows[^1].Cells[2];
+        BindProjects(Configuration.Projects.Count - 1);
+        if (gridProjects.Rows.Count > 0 && gridProjects.Columns.Count > 2)
+            gridProjects.CurrentCell = gridProjects.Rows[^1].Cells[2];
     }
 
     private void ButtonDeleteProject_Click(object? sender, EventArgs e)
     {
-        if (_isDesignTime) return;
-        CommitBindingEdits(); CommitStepGrid(_boundProject); CommitProjectGrid(); int index = gridProjects.CurrentRow?.Index ?? -1;
-        if (index < 0 || index >= Configuration.Projects.Count) return;
-        Configuration.Projects.RemoveAt(index); _boundProject = null; BindProjects();
+        if (_isDesignTime || _rebindingGrids) return;
+
+        // Resolve the bound object before committing/resetting the grid.  A
+        // DataGridView row index is only a presentation detail and may be
+        // transient during SelectionChanged; using the object identity avoids
+        // deleting a neighbouring project when rows are sorted or rebound.
+        TestProject? project = GetSelectedProject();
+        if (project is null || !Configuration.Projects.Contains(project)) return;
+        int oldIndex = Configuration.Projects.IndexOf(project);
+
+        CommitBindingEdits();
+        CommitStepGrid(_boundProject);
+        CommitProjectGrid();
+
+        DialogResult confirmation = MessageBox.Show(
+            this,
+            $"确定删除测试项目“{project.Name}”吗？\r\n该项目的固定图卡绑定也会一并删除。",
+            "删除项目",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+        if (confirmation != DialogResult.Yes) return;
+
+        Configuration.Projects.Remove(project);
+        ReindexProjects(Configuration.Projects);
+        _boundProject = null;
+        int preferredIndex = Math.Min(Math.Max(oldIndex, 0), Configuration.Projects.Count - 1);
+        BindProjects(preferredIndex);
     }
 
     private void ButtonAddStep_Click(object? sender, EventArgs e)
     {
         if (_isDesignTime) return;
-        CommitBindingEdits(); CommitStepGrid(_boundProject); CommitProjectGrid(); TestProject? project = gridProjects.CurrentRow?.DataBoundItem as TestProject;
+        CommitBindingEdits(); CommitStepGrid(_boundProject); CommitProjectGrid(); TestProject? project = GetSelectedProject();
         if (project is null) return;
         project.Steps.Add(new TestStep { Order = project.Steps.Count + 1, Name = "新图卡", MeasurementRequest = Protocol.MessageProtocol.DefaultMeasurementRequest });
         BindSelectedSteps();
@@ -729,10 +918,17 @@ public partial class RecipeManagerForm : Form
 
     private void ButtonDeleteStep_Click(object? sender, EventArgs e)
     {
-        if (_isDesignTime) return;
-        CommitBindingEdits(); CommitStepGrid(_boundProject); CommitProjectGrid(); TestProject? project = gridProjects.CurrentRow?.DataBoundItem as TestProject; int si = gridSteps.CurrentRow?.Index ?? -1;
-        if (project is null || si < 0 || si >= project.Steps.Count) return;
-        project.Steps.RemoveAt(si); BindSelectedSteps();
+        if (_isDesignTime || _rebindingGrids) return;
+        TestProject? project = GetSelectedProject();
+        TestStep? step = GetSelectedStep();
+        if (project is null || step is null || !project.Steps.Contains(step)) return;
+
+        CommitBindingEdits();
+        CommitStepGrid(project);
+        CommitProjectGrid();
+        if (!project.Steps.Remove(step)) return;
+        ReindexSteps(project.Steps);
+        BindSelectedSteps();
     }
 
     private void ButtonSave_Click(object? sender, EventArgs e)
@@ -770,9 +966,14 @@ public partial class RecipeManagerForm : Form
         if (gridProjects.DataSource is not List<TestProject> list) return;
         try { gridProjects.EndEdit(); } catch { }
         // DataGridView 绑定到 List<T> 不会自动写回所有文本单元格；显式读取，保证退出值完整保留。
-        for (int row = 0; row < gridProjects.Rows.Count && row < list.Count; row++)
+        // Always resolve the object from DataBoundItem instead of assuming
+        // Rows[row] == list[row].  During a rebind (and after deleting a row)
+        // that positional assumption is false and used to produce index
+        // exceptions or write one project's values into another.
+        foreach (DataGridViewRow r in gridProjects.Rows)
         {
-            DataGridViewRow r = gridProjects.Rows[row]; TestProject p = list[row];
+            if (r.IsNewRow || r.DataBoundItem is not TestProject p || !list.Contains(p))
+                continue;
             string previousRecipePath = p.RecipeFilePath ?? string.Empty;
             string editedRecipePath = CellText(r, "RecipeFilePath", previousRecipePath).Trim();
             p.Enabled = CellBool(r, "Enabled", p.Enabled); p.Order = CellInt(r, "Order", p.Order); p.Name = CellText(r, "Name", p.Name);
@@ -799,15 +1000,46 @@ public partial class RecipeManagerForm : Form
         if (project is null) return;
         try { gridSteps.EndEdit(); } catch { }
         var list = project.Steps;
-        for (int row = 0; row < gridSteps.Rows.Count && row < list.Count; row++)
+        // As with projects, use DataBoundItem rather than a row index.  The
+        // step grid is rebound whenever the project selection changes, and a
+        // transient old row must never be interpreted as the new project's
+        // step at the same index.
+        foreach (DataGridViewRow r in gridSteps.Rows)
         {
-            DataGridViewRow r = gridSteps.Rows[row]; TestStep s = list[row]; s.Order = CellInt(r, "StepOrder", s.Order); s.Name = CellText(r, "StepName", s.Name); s.ImagePath = CellText(r, "ImagePath", s.ImagePath); s.StabilizeDelayMs = Math.Max(0, CellInt(r, "Delay", s.StabilizeDelayMs)); string request = CellText(r, "Request", s.MeasurementRequest); s.MeasurementRequest = string.IsNullOrWhiteSpace(request) ? Protocol.MessageProtocol.DefaultMeasurementRequest : Protocol.MessageProtocol.MigrateMeasurementRequest(request); r.Cells["Request"].Value = s.MeasurementRequest;
+            if (r.IsNewRow || r.DataBoundItem is not TestStep s || !list.Contains(s))
+                continue;
+            s.Order = CellInt(r, "StepOrder", s.Order);
+            s.Name = CellText(r, "StepName", s.Name);
+            s.ImagePath = CellText(r, "ImagePath", s.ImagePath);
+            s.StabilizeDelayMs = Math.Max(0, CellInt(r, "Delay", s.StabilizeDelayMs));
+            string request = CellText(r, "Request", s.MeasurementRequest);
+            s.MeasurementRequest = string.IsNullOrWhiteSpace(request)
+                ? Protocol.MessageProtocol.DefaultMeasurementRequest
+                : Protocol.MessageProtocol.MigrateMeasurementRequest(request);
+            if (gridSteps.Columns.Contains("Request"))
+                r.Cells["Request"].Value = s.MeasurementRequest;
         }
     }
 
-    private static string CellText(DataGridViewRow row, string name, string fallback) => row.Cells[name].Value?.ToString() ?? fallback;
-    private static int CellInt(DataGridViewRow row, string name, int fallback) => int.TryParse(row.Cells[name].Value?.ToString(), out int value) ? value : fallback;
-    private static bool CellBool(DataGridViewRow row, string name, bool fallback) => row.Cells[name].Value is bool b ? b : bool.TryParse(row.Cells[name].Value?.ToString(), out bool value) ? value : fallback;
+    private static string CellText(DataGridViewRow row, string name, string fallback)
+    {
+        if (row.DataGridView is null || !row.DataGridView.Columns.Contains(name)) return fallback;
+        return row.Cells[name].Value?.ToString() ?? fallback;
+    }
+
+    private static int CellInt(DataGridViewRow row, string name, int fallback)
+    {
+        if (row.DataGridView is null || !row.DataGridView.Columns.Contains(name)) return fallback;
+        return int.TryParse(row.Cells[name].Value?.ToString(), out int value) ? value : fallback;
+    }
+
+    private static bool CellBool(DataGridViewRow row, string name, bool fallback)
+    {
+        if (row.DataGridView is null || !row.DataGridView.Columns.Contains(name)) return fallback;
+        return row.Cells[name].Value is bool b
+            ? b
+            : bool.TryParse(row.Cells[name].Value?.ToString(), out bool value) ? value : fallback;
+    }
 
     private static TestPlanConfiguration Clone(TestPlanConfiguration value)
         => value.Clone();

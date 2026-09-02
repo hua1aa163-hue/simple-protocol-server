@@ -24,6 +24,9 @@ public partial class DashboardForm : Form
     private TestPlanRunner? _runner;
     private Task? _runTask;
     private DataProcessing.TestDataProcessingResult? _lastCrosstalkResult;
+    // 一轮中可能产生多个串扰热图；保留每一批的结果对象，允许测试结束后逐个查看。
+    // 结果目录由数据处理层独立创建，这里只保存引用，不复制或覆盖任何文件。
+    private readonly List<CrosstalkResultEntry> _crosstalkResultHistory = new();
     // 手动报文是异步事务；在收到最终应答前禁止再次点击，避免重复测量。
     private bool _manualSendInProgress;
     // 独立记录一键测试状态，避免手动事务结束时覆盖 SetRunningUi 的禁用状态。
@@ -170,8 +173,7 @@ public partial class DashboardForm : Form
         _runner.ProgressChanged -= Runner_ProgressChanged;
         _runner.ProgressChanged += Runner_ProgressChanged;
         gridResults.Rows.Clear();
-        _lastCrosstalkResult = null;
-        buttonViewCrosstalk.Enabled = false;
+        ResetCrosstalkResultHistory();
         SetRunningUi(true);
         _runTask = RunPlanSafeAsync(_configuration);
         await _runTask;
@@ -308,10 +310,27 @@ public partial class DashboardForm : Form
                 gridResults.Rows.Add(result.ProjectName, metric.DisplayName, metric.Value, metric.Source, metric.Status, result.OutputDirectory ?? string.Empty);
             if (result.Kind == TestProjectKind.Crosstalk && !string.IsNullOrWhiteSpace(result.HeatmapPath))
             {
+                var entry = new CrosstalkResultEntry(
+                    result,
+                    BuildCrosstalkResultDisplay(result, _crosstalkResultHistory.Count + 1));
+                _crosstalkResultHistory.Add(entry);
+                comboCrosstalkResults.Items.Add(entry);
+                // 新结果默认选中，保持原有“查看串扰热图”按钮语义；
+                // 用户也可以在测试结束后从下拉框切换到前几次结果。
+                comboCrosstalkResults.SelectedIndex = comboCrosstalkResults.Items.Count - 1;
                 _lastCrosstalkResult = result;
-                buttonViewCrosstalk.Enabled = File.Exists(result.HeatmapPath);
+                UpdateCrosstalkViewState();
             }
         });
+    }
+
+    private void ComboCrosstalkResults_SelectedIndexChanged(object? sender, EventArgs e)
+    {
+        if (comboCrosstalkResults.SelectedItem is CrosstalkResultEntry entry)
+            _lastCrosstalkResult = entry.Result;
+        else if (_crosstalkResultHistory.Count == 0)
+            _lastCrosstalkResult = null;
+        UpdateCrosstalkViewState();
     }
 
     private void ButtonViewCrosstalk_Click(object? sender, EventArgs e)
@@ -434,8 +453,49 @@ public partial class DashboardForm : Form
         buttonStart.Enabled = !running && !_manualSendInProgress;
         buttonStop.Enabled = running; buttonRecipeManager.Enabled = !running; buttonListen.Enabled = !running;
         UpdateManualButtonState();
-        buttonViewCrosstalk.Enabled = !running && _lastCrosstalkResult?.HeatmapPath is string path && File.Exists(path);
+        UpdateCrosstalkViewState();
         labelProgress.Text = running ? "正在执行..." : "等待开始";
+    }
+
+    private void ResetCrosstalkResultHistory()
+    {
+        _crosstalkResultHistory.Clear();
+        comboCrosstalkResults.Items.Clear();
+        _lastCrosstalkResult = null;
+        UpdateCrosstalkViewState();
+    }
+
+    private void UpdateCrosstalkViewState()
+    {
+        if (IsDisposed || Disposing) return;
+        bool hasResults = _crosstalkResultHistory.Count > 0;
+        comboCrosstalkResults.Enabled = !_planRunning && hasResults;
+        buttonViewCrosstalk.Enabled = !_planRunning &&
+            _lastCrosstalkResult?.HeatmapPath is string path && File.Exists(path);
+    }
+
+    private static string BuildCrosstalkResultDisplay(
+        DataProcessing.TestDataProcessingResult result,
+        int ordinal)
+    {
+        string folder = string.IsNullOrWhiteSpace(result.OutputDirectory)
+            ? "未指定输出目录"
+            : Path.GetFileName(result.OutputDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(folder)) folder = result.OutputDirectory ?? "未指定输出目录";
+        return $"第 {ordinal} 次：{folder}";
+    }
+
+    private sealed class CrosstalkResultEntry
+    {
+        public CrosstalkResultEntry(DataProcessing.TestDataProcessingResult result, string displayText)
+        {
+            Result = result;
+            DisplayText = displayText;
+        }
+
+        public DataProcessing.TestDataProcessingResult Result { get; }
+        public string DisplayText { get; }
+        public override string ToString() => DisplayText;
     }
 
     private void UpdateManualButtonState()

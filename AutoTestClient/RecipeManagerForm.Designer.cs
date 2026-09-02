@@ -236,14 +236,16 @@ namespace AutoTestClient
             // column has a binding context and throw a null-reference error.
             // Items is serialized and rendered safely at design time while
             // retaining the same run-time choices.
-            this.projectKindColumn.Items.AddRange(new object[] {
-                Models.TestProjectKind.Generic,
-                Models.TestProjectKind.Fov,
-                Models.TestProjectKind.Contrast,
-                Models.TestProjectKind.BrightnessUniformity,
-                Models.TestProjectKind.Gamut,
-                Models.TestProjectKind.Crosstalk
-            });
+            // Keep enum items as individual statements.  The WinForms
+            // CodeDom reader used by some Visual Studio versions cannot
+            // deserialize an enum-valued object[] passed to AddRange and
+            // reports a misleading error on the following field declaration.
+            this.projectKindColumn.Items.Add(Models.TestProjectKind.Generic);
+            this.projectKindColumn.Items.Add(Models.TestProjectKind.Fov);
+            this.projectKindColumn.Items.Add(Models.TestProjectKind.Contrast);
+            this.projectKindColumn.Items.Add(Models.TestProjectKind.BrightnessUniformity);
+            this.projectKindColumn.Items.Add(Models.TestProjectKind.Gamut);
+            this.projectKindColumn.Items.Add(Models.TestProjectKind.Crosstalk);
             this.projectKindColumn.HeaderText = "类型";
             this.projectKindColumn.Name = "Kind";
             this.projectKindColumn.FillWeight = 130F;
@@ -661,7 +663,11 @@ namespace AutoTestClient
         {
             if (disposing && (this.components != null))
             {
-                this.pictureBoxImagePreview?.Image?.Dispose();
+                if (this.pictureBoxImagePreview != null && this.pictureBoxImagePreview.Image != null)
+                {
+                    this.pictureBoxImagePreview.Image.Dispose();
+                    this.pictureBoxImagePreview.Image = null;
+                }
                 this.components.Dispose();
             }
             base.Dispose(disposing);
