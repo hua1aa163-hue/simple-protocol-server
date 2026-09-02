@@ -41,6 +41,7 @@ for (int row = 0; row < crosstalkInput.GetLength(0); row++)
 var crosstalk = CrosstalkDataProcessor.Calculate(crosstalkInput);
 Check(crosstalk.ValuesForStatistics.GetLength(0) == 19 && crosstalk.ValuesForStatistics.GetLength(1) == 32, "串扰矩阵 19x32");
 Check(Math.Abs(crosstalk.Mean - 0.01) < 1e-9, "串扰比值和 3% 异常阈值");
+await CrosstalkDataSmokeTests.RunAsync(Check);
 Check(MessageProtocol.GetResponseTimeout(MessageProtocol.DefaultMeasurementRequest) == TimeSpan.FromSeconds(600), "测量等待上限 600 秒");
 var defaults = new TestPlanConfiguration(); defaults.Normalize();
 Check(defaults.Projects.Count == 5 && defaults.Projects[0].Kind == TestProjectKind.Fov && defaults.Projects[^1].Kind == TestProjectKind.Crosstalk, "默认项目顺序");
