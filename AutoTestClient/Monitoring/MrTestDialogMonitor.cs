@@ -137,8 +137,14 @@ public sealed class MrTestDialogMonitor : IAsyncDisposable
                 : "启动监视时未找到 MRTEST；将在首次发现时绑定进程，绑定后不自动切换实例。";
             foreach ((nint handle, DialogFingerprint fingerprint) in CaptureCurrentDialogs())
                 _reported[handle] = fingerprint;
-            _cts = new CancellationTokenSource();
-            _task = Task.Run(() => PollLoopAsync(_cts.Token));
+            // Capture the newly-created source in the task closure.  StopAsync
+            // intentionally clears the field before awaiting the old task;
+            // reading _cts.Token from that closure could otherwise race with
+            // cleanup and throw NullReferenceException during a fast
+            // start/stop cycle (for example, a sequential smoke test).
+            var cancellation = new CancellationTokenSource();
+            _cts = cancellation;
+            _task = Task.Run(() => PollLoopAsync(cancellation.Token));
         }
         Raise(MonitorLog, startupMessage);
     }

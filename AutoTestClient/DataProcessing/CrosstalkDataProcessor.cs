@@ -25,7 +25,65 @@ public sealed record CrosstalkCalculationResult(
     double[,] ValuesForHeatmap,
     double Maximum,
     double Minimum,
-    double Mean);
+    double Mean)
+{
+    /// <summary>未剔除边框、异常点和用户掩膜的 19×32 原始串扰比例矩阵。</summary>
+    public double[,] RawValues { get; init; } = new double[0, 0];
+
+    /// <summary>固定的外围边框掩膜。</summary>
+    public bool[,] BorderMask { get; init; } = new bool[0, 0];
+
+    /// <summary>按当前阈值计算出的异常点掩膜（边框之外仍可用于显示）。</summary>
+    public bool[,] AbnormalMask { get; init; } = new bool[0, 0];
+
+    /// <summary>用户坐标/鼠标掩膜。</summary>
+    public bool[,] UserMask { get; init; } = new bool[0, 0];
+
+    /// <summary>本次计算实际使用的参数。</summary>
+    public CrosstalkAnalysisOptions AnalysisOptions { get; init; } =
+        CrosstalkAnalysisOptions.Default;
+
+    /// <summary>统计中有效点数量。</summary>
+    public int ValidPointCount
+    {
+        get
+        {
+            int count = 0;
+            foreach (double value in ValuesForStatistics)
+                if (double.IsFinite(value)) count++;
+            return count;
+        }
+    }
+
+    /// <summary>当前阈值下、去除边框后的异常点数量（用户掩膜点不计入）。</summary>
+    public int AbnormalPointCount
+    {
+        get
+        {
+            bool[,]? abnormalMask = AbnormalMask;
+            bool[,]? borderMask = BorderMask;
+            bool[,]? userMask = UserMask;
+            if (abnormalMask is null || abnormalMask.Length == 0) return 0;
+            int count = 0;
+            bool hasBorderMask = borderMask is not null &&
+                                 borderMask.GetLength(0) == abnormalMask.GetLength(0) &&
+                                 borderMask.GetLength(1) == abnormalMask.GetLength(1);
+            bool hasUserMask = userMask is not null &&
+                               userMask.GetLength(0) == abnormalMask.GetLength(0) &&
+                               userMask.GetLength(1) == abnormalMask.GetLength(1);
+            for (int row = 0; row < abnormalMask.GetLength(0); row++)
+            {
+                for (int column = 0; column < abnormalMask.GetLength(1); column++)
+                {
+                    if (abnormalMask[row, column] &&
+                        (!hasBorderMask || !borderMask![row, column]) &&
+                        (!hasUserMask || !userMask![row, column])) count++;
+                }
+            }
+            return count;
+        }
+    }
+}
 
 /// <summary>自动处理完成后交给界面显示的结果。</summary>
 public sealed record CrosstalkProcessingResult(
@@ -34,7 +92,23 @@ public sealed record CrosstalkProcessingResult(
     string CrosstalkWorkbookPath,
     string HeatmapPath,
     int SourceFileCount,
+    CrosstalkCalculationResult Calculation)
+{
+    public CrosstalkAnalysisOptions AnalysisOptions => Calculation.AnalysisOptions;
+}
+
+/// <summary>导出当前掩膜/色轴设置生成的独立结果文件。</summary>
+public sealed record CrosstalkExportResult(
+    string CrosstalkWorkbookPath,
+    string HeatmapPath,
     CrosstalkCalculationResult Calculation);
+
+/// <summary>直接选择 ExportFile 根目录时读取到的串扰输入。</summary>
+public sealed record CrosstalkFolderData(
+    string SourceRoot,
+    IReadOnlyList<string> Subfolders,
+    IReadOnlyList<string> ExcelFiles,
+    double[,] MergedData);
 
 /// <summary>串扰测试数据定位、归档、计算和输出的统一入口。</summary>
 public static class CrosstalkDataProcessor
@@ -47,7 +121,7 @@ public static class CrosstalkDataProcessor
     // 固定为相同画布后，每个采样格有足够空间显示三位小数，不会再出现数字被截断。
     public const int HeatmapImageWidth = 3792;
     public const int HeatmapImageHeight = 2408;
-    public const double AbnormalThreshold = 0.03;
+    public const double AbnormalThreshold = CrosstalkAnalysisOptions.DefaultAbnormalThresholdRatio;
 
     private static readonly TimeSpan ExportWaitTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan ExportPollInterval = TimeSpan.FromMilliseconds(500);
@@ -93,8 +167,34 @@ public static class CrosstalkDataProcessor
         IReadOnlyList<CrosstalkTestRecord> tests,
         IProgress<string>? progress,
         CancellationToken cancellationToken)
+        => await ProcessCompletedTestAsync(
+            sourceRoot,
+            outputRoot,
+            testStartedUtc,
+            snapshot,
+            tests,
+            progress,
+            cancellationToken,
+            analysisOptions: null).ConfigureAwait(false);
+
+    /// <summary>
+    /// 等待并处理一批串扰导出数据，使用指定的异常阈值、色轴和用户掩膜。
+    /// 旧的无 options 重载保留 3% 阈值和 0..50% 色轴的默认行为。
+    /// </summary>
+    public static async Task<CrosstalkProcessingResult> ProcessCompletedTestAsync(
+        string sourceRoot,
+        string outputRoot,
+        DateTime testStartedUtc,
+        IReadOnlyDictionary<string, ExportFolderFingerprint> snapshot,
+        IReadOnlyList<CrosstalkTestRecord> tests,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken,
+        CrosstalkAnalysisOptions? analysisOptions)
     {
         if (tests.Count == 0) throw new ArgumentException("没有完成的测试记录。", nameof(tests));
+
+        CrosstalkAnalysisOptions options = (analysisOptions ?? CrosstalkAnalysisOptions.Default)
+            .Normalize();
 
         progress?.Report($"等待测试设备导出 {tests.Count} 份 Excel 数据...");
         IReadOnlyList<ExportFolderData> sourceFolders = await WaitForExportFoldersAsync(
@@ -120,7 +220,7 @@ public static class CrosstalkDataProcessor
         WriteTestMapping(outputDirectory, tests, sourceFolders);
         progress?.Report("正在读取每个 Excel 的 Brightness 工作表 C 列...");
         double[,] mergedData = MergeBrightnessColumns(archivedExcelFiles);
-        CrosstalkCalculationResult calculation = Calculate(mergedData);
+        CrosstalkCalculationResult calculation = Calculate(mergedData, options);
 
         string folderName = Path.GetFileName(outputDirectory);
         string rawWorkbookPath = Path.Combine(
@@ -132,8 +232,8 @@ public static class CrosstalkDataProcessor
 
         SimpleXlsx.WriteWorkbook(rawWorkbookPath,
             [new XlsxSheetData("Sheet1", ToObjectMatrix(mergedData))]);
-        WriteCrosstalkWorkbook(crosstalkWorkbookPath, calculation);
-        WriteHeatmap(heatmapPath, folderName, calculation.ValuesForHeatmap);
+        WriteCrosstalkWorkbook(crosstalkWorkbookPath, calculation, options);
+        WriteHeatmap(heatmapPath, folderName, calculation.ValuesForHeatmap, options);
 
         return new CrosstalkProcessingResult(
             outputDirectory,
@@ -144,7 +244,13 @@ public static class CrosstalkDataProcessor
             calculation);
     }
 
-    /// <summary>把多个等长或不等长 C 列按 MATLAB 规则合成“测试点×测试图”矩阵。</summary>
+    /// <summary>
+    /// 把多个等长或不等长 C 列按 MATLAB 规则合成“测试点×测试图”矩阵。
+    /// <para>
+    /// 不在这里强制限定 612 行：参考程序会在计算阶段执行
+    /// <c>values[1:-3]</c>，再裁掉首尾纯 NaN 行，最终以 608 个采样点为准。
+    /// </para>
+    /// </summary>
     public static double[,] MergeBrightnessColumns(IReadOnlyList<string> excelFiles)
     {
         if (excelFiles.Count == 0) throw new InvalidDataException("没有可处理的 Excel 文件。");
@@ -157,12 +263,6 @@ public static class CrosstalkDataProcessor
         }
 
         int maximumRows = columns.Max(column => column.Length);
-        if (maximumRows != ExpectedBrightnessRows)
-        {
-            throw new InvalidDataException(
-                $"Brightness 工作表 C 列应读取到 {ExpectedBrightnessRows} 行（第 1 行标题、" +
-                $"中间 608 个测试点、最后 3 行汇总），实际为 {maximumRows} 行。无法按 19×32 还原。");
-        }
 
         var merged = new double[maximumRows, columns.Count];
         for (int row = 0; row < maximumRows; row++)
@@ -178,17 +278,62 @@ public static class CrosstalkDataProcessor
     }
 
     /// <summary>
+    /// 按参考 CrosstalkAnalyzer 的规则读取 ExportFile 根目录：一级子文件夹按名称排序，
+    /// 每个子文件夹取名称排序后的首个 xlsx，并合并其 Brightness!C 列。
+    /// </summary>
+    public static CrosstalkFolderData ReadBrightnessFolder(string sourceRoot)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceRoot);
+        if (!Directory.Exists(sourceRoot))
+            throw new DirectoryNotFoundException($"串扰数据文件夹不存在：{sourceRoot}");
+
+        string[] directories = Directory.EnumerateDirectories(sourceRoot)
+            .OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (directories.Length == 0)
+            throw new InvalidDataException("所选串扰数据文件夹中没有一级子文件夹。");
+
+        var excelFiles = new List<string>(directories.Length);
+        foreach (string directory in directories)
+        {
+            string? excel = FindFirstExcelFile(directory);
+            if (excel is null)
+                throw new InvalidDataException(
+                    $"子文件夹“{Path.GetFileName(directory)}”中没有可读取的 xlsx 文件。");
+            excelFiles.Add(excel);
+        }
+        double[,] merged = MergeBrightnessColumns(excelFiles);
+        return new CrosstalkFolderData(sourceRoot, directories, excelFiles, merged);
+    }
+
+    /// <summary>直接从 ExportFile 根目录读取并计算，不依赖一次自动测试的完成记录。</summary>
+    public static CrosstalkCalculationResult CalculateFolder(
+        string sourceRoot,
+        CrosstalkAnalysisOptions? analysisOptions = null)
+        => Calculate(ReadBrightnessFolder(sourceRoot).MergedData, analysisOptions);
+
+    /// <summary>
     /// 严格翻译 MATLAB 计算段。最后一列是本底，前面的列平均分成前后两组并一一配对。
     /// 对每个采样点计算正向和反向两个比值，负数先改成 100，再从全部比值中取最小值。
     /// </summary>
-    public static CrosstalkCalculationResult Calculate(double[,] mergedData)
+    public static CrosstalkCalculationResult Calculate(double[,] mergedData) =>
+        Calculate(mergedData, CrosstalkAnalysisOptions.Default);
+
+    /// <summary>使用指定分析参数计算串扰矩阵。</summary>
+    public static CrosstalkCalculationResult Calculate(
+        double[,] mergedData,
+        CrosstalkAnalysisOptions? analysisOptions)
     {
+        ArgumentNullException.ThrowIfNull(mergedData);
         int rowCount = mergedData.GetLength(0);
         int columnCount = mergedData.GetLength(1);
-        if (rowCount != ExpectedBrightnessRows)
+        // MATLAB 的 values[1:-3] 至少要有 608 个位置；额外的首尾纯 NaN
+        // 行会在下面按参考程序的自动数值区规则裁掉。
+        if (rowCount < HeatmapRows * HeatmapColumns + 4)
         {
             throw new InvalidDataException(
-                $"串扰计算需要 {ExpectedBrightnessRows} 行数据，实际为 {rowCount} 行。");
+                $"串扰计算至少需要 {HeatmapRows * HeatmapColumns + 4} 行数据，实际为 {rowCount} 行；" +
+                "按 MATLAB 的首行/末三行规则无法得到 608 个采样点。");
         }
         if (columnCount < 3 || columnCount % 2 == 0)
         {
@@ -198,8 +343,11 @@ public static class CrosstalkDataProcessor
 
         int pairedColumnCount = (columnCount - 1) / 2;
         int backgroundColumn = columnCount - 1;
-        var ratios = new double[ExpectedBrightnessRows];
-        // ratios[0] 保持 MATLAB zeros(612,1) 的初始 0；真正数据从第 2 行开始计算。
+        // Keep one ratio slot for every source row.  Typical MRTEST files have
+        // 612 rows, but the reference reader may retain extra edge rows that
+        // are removed by the [1:-3] + NaN trimming below.
+        var ratios = new double[rowCount];
+        // ratios[0] 保持 MATLAB zeros(rows,1) 的初始 0；真正数据从第 2 行开始计算。
         for (int row = 1; row < rowCount; row++)
         {
             var candidates = new double[pairedColumnCount * 2];
@@ -216,8 +364,27 @@ public static class CrosstalkDataProcessor
             ratios[row] = MinimumIncludingNaN(candidates);
         }
 
-        // MATLAB：AA(1,:)=[]，再 AA(end-2:end,:)=[]，保留原数组第 2 到第 609 行。
-        double[] reshapedSource = ratios.Skip(1).Take(HeatmapRows * HeatmapColumns).ToArray();
+        // MATLAB：AA(1,:)=[]，再 AA(end-2:end,:)=[]；参考 Python 工具还会
+        // 清除 pandas 在数据区首尾保留的纯文本/空白行。这里同样只裁剪
+        // 首尾 NaN，保留内部 NaN（它们会在后续统计中被排除）。
+        double[] trimmed = ratios.Skip(1).Take(rowCount - 4).ToArray();
+        int firstFinite = 0;
+        while (firstFinite < trimmed.Length && double.IsNaN(trimmed[firstFinite]))
+            firstFinite++;
+        int lastFinite = trimmed.Length - 1;
+        while (lastFinite >= firstFinite && double.IsNaN(trimmed[lastFinite]))
+            lastFinite--;
+        int sampleCount = lastFinite >= firstFinite ? lastFinite - firstFinite + 1 : 0;
+        if (sampleCount != HeatmapRows * HeatmapColumns)
+        {
+            throw new InvalidDataException(
+                $"按 MATLAB 规则清理表头及末三行后应有 {HeatmapRows * HeatmapColumns} 个采样点，" +
+                $"当前为 {sampleCount}；请检查 Brightness!C:C 数据区。");
+        }
+        double[] reshapedSource = trimmed
+            .Skip(firstFinite)
+            .Take(sampleCount)
+            .ToArray();
         var restored = new double[HeatmapRows, HeatmapColumns];
         for (int row = 0; row < HeatmapRows; row++)
         {
@@ -228,6 +395,120 @@ public static class CrosstalkDataProcessor
             }
         }
 
+        return ApplyAnalysisOptions(restored, analysisOptions);
+    }
+
+    /// <summary>用原始比例阈值快速计算；例如 0.03 表示 3%。</summary>
+    public static CrosstalkCalculationResult Calculate(
+        double[,] mergedData,
+        double abnormalThresholdRatio)
+        => Calculate(mergedData, new CrosstalkAnalysisOptions
+        {
+            AbnormalThresholdRatio = abnormalThresholdRatio
+        });
+
+    /// <summary>
+    /// 计算两个同尺寸矩阵的相对差值（百分比）。
+    /// <para>
+    /// 这是参考分析器公开的通用 <c>calculate_crosstalk(signal, reference)</c>
+    /// 入口的纯 C# 实现；返回值单位为百分比，而本类的 MATLAB 串扰矩阵
+    /// 入口仍使用比例（例如 0.03 表示 3%）。没有 reference 时返回 signal
+    /// 的独立副本；参考矩阵为零或结果非有限的位置返回 <see cref="double.NaN"/>。
+    /// </para>
+    /// </summary>
+    public static double[,] CalculateCrosstalk(
+        double[,] signal,
+        double[,]? reference = null)
+    {
+        ArgumentNullException.ThrowIfNull(signal);
+        if (reference is null) return (double[,])signal.Clone();
+        if (signal.GetLength(0) != reference.GetLength(0) ||
+            signal.GetLength(1) != reference.GetLength(1))
+        {
+            throw new InvalidDataException(
+                $"信号与参考矩阵尺寸不一致：{signal.GetLength(0)}×{signal.GetLength(1)} / " +
+                $"{reference.GetLength(0)}×{reference.GetLength(1)}。");
+        }
+
+        var result = new double[signal.GetLength(0), signal.GetLength(1)];
+        for (int row = 0; row < signal.GetLength(0); row++)
+        {
+            for (int column = 0; column < signal.GetLength(1); column++)
+            {
+                double value = (signal[row, column] - reference[row, column]) /
+                               Math.Abs(reference[row, column]) * 100d;
+                result[row, column] = double.IsFinite(value) ? value : double.NaN;
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// 读取参考分析器支持的通用二维矩阵文件（CSV/TSV/TXT/XLSX/常见 NPY）。
+    /// 该转发入口让现有串扰处理器调用方无需依赖读取器具体类型。
+    /// </summary>
+    public static double[,] ReadMatrix(string path) => CrosstalkMatrixReader.ReadMatrix(path);
+
+    /// <summary>列出目录内支持的通用矩阵文件，按修改时间和文件名排序。</summary>
+    public static IReadOnlyList<string> ListDataFiles(string folder) =>
+        CrosstalkMatrixReader.ListDataFiles(folder);
+
+    /// <summary>计算任意矩阵的有限点统计值，支持可选排除掩膜。</summary>
+    public static CrosstalkStatistics Statistics(double[,] values, bool[,]? excluded = null) =>
+        CrosstalkAnalysisUtilities.Statistics(values, excluded);
+
+    /// <summary>创建 1-based、含首尾坐标的矩形掩膜。</summary>
+    public static bool[,] RectangleMask(int rows, int columns,
+        int x1, int y1, int x2, int y2) =>
+        CrosstalkAnalysisUtilities.RectangleMask(rows, columns, x1, y1, x2, y2);
+
+    /// <summary>把 1-based、含首尾坐标的矩形加入现有掩膜。</summary>
+    public static void AddRectangle(bool[,] mask, int x1, int y1, int x2, int y2) =>
+        CrosstalkAnalysisUtilities.AddRectangle(mask, x1, y1, x2, y2);
+
+    /// <summary>按比例阈值创建异常点掩膜。</summary>
+    public static bool[,] MakeAbnormalMask(double[,] values, double threshold = .03d) =>
+        CrosstalkAnalysisUtilities.MakeAbnormalMask(values, threshold);
+
+    /// <summary>
+    /// 对已有计算结果重新应用阈值、色轴和用户掩膜，无需重新读取 ExportFile。
+    /// 该入口用于主界面调整选项或导出当前掩膜结果。
+    /// </summary>
+    public static CrosstalkCalculationResult Recalculate(
+        CrosstalkCalculationResult calculation,
+        CrosstalkAnalysisOptions? analysisOptions)
+    {
+        ArgumentNullException.ThrowIfNull(calculation);
+        double[,] raw = calculation.RawValues;
+        if (raw.GetLength(0) != HeatmapRows || raw.GetLength(1) != HeatmapColumns)
+            throw new InvalidDataException("现有串扰结果没有可重新计算的 19×32 原始矩阵。");
+        return ApplyAnalysisOptions((double[,])raw.Clone(), analysisOptions);
+    }
+
+    private static CrosstalkCalculationResult ApplyAnalysisOptions(
+        double[,] restored,
+        CrosstalkAnalysisOptions? analysisOptions)
+    {
+        if (restored.GetLength(0) != HeatmapRows || restored.GetLength(1) != HeatmapColumns)
+            throw new InvalidDataException($"串扰矩阵必须为 {HeatmapRows}×{HeatmapColumns}。");
+
+        CrosstalkAnalysisOptions options = (analysisOptions ?? CrosstalkAnalysisOptions.Default)
+            .Normalize(HeatmapRows, HeatmapColumns);
+        bool[,] userMask = options.UserMask is null
+            ? new bool[HeatmapRows, HeatmapColumns]
+            : (bool[,])options.UserMask.Clone();
+        var borderMask = new bool[HeatmapRows, HeatmapColumns];
+        var abnormalMask = new bool[HeatmapRows, HeatmapColumns];
+        for (int row = 0; row < HeatmapRows; row++)
+        {
+            for (int column = 0; column < HeatmapColumns; column++)
+            {
+                borderMask[row, column] = row == 0 || row == HeatmapRows - 1 ||
+                                          column == 0 || column == HeatmapColumns - 1;
+                abnormalMask[row, column] = restored[row, column] > options.AbnormalThresholdRatio;
+            }
+        }
+
         var valuesForStatistics = (double[,])restored.Clone();
         var valuesForHeatmap = (double[,])restored.Clone();
         var validStatistics = new List<double>();
@@ -235,34 +516,34 @@ public static class CrosstalkDataProcessor
         {
             for (int column = 0; column < HeatmapColumns; column++)
             {
-                bool isBorder = row == 0 || row == HeatmapRows - 1 ||
-                                column == 0 || column == HeatmapColumns - 1;
-                bool isAbnormal = restored[row, column] > AbnormalThreshold;
-
-                // 边框既不绘图也不统计；>3% 异常值保留绘图，但不进入统计。
-                if (isBorder) valuesForHeatmap[row, column] = double.NaN;
-                if (isBorder || isAbnormal)
+                bool excludedFromHeatmap = borderMask[row, column] || userMask[row, column];
+                bool excludedFromStatistics = excludedFromHeatmap || abnormalMask[row, column];
+                // 边框和用户掩膜显示为深灰；异常值保留绘图但不进入统计。
+                if (excludedFromHeatmap) valuesForHeatmap[row, column] = double.NaN;
+                if (excludedFromStatistics)
                 {
                     valuesForStatistics[row, column] = double.NaN;
                 }
-                else if (!double.IsNaN(restored[row, column]))
+                else if (double.IsFinite(restored[row, column]))
                 {
                     validStatistics.Add(restored[row, column]);
                 }
             }
         }
 
-        if (validStatistics.Count == 0)
-        {
-            throw new InvalidDataException("剔除边框和大于 3% 的异常值后，没有可用于统计的数据。");
-        }
-
         return new CrosstalkCalculationResult(
             valuesForStatistics,
             valuesForHeatmap,
-            validStatistics.Max(),
-            validStatistics.Min(),
-            validStatistics.Average());
+            validStatistics.Count == 0 ? double.NaN : validStatistics.Max(),
+            validStatistics.Count == 0 ? double.NaN : validStatistics.Min(),
+            validStatistics.Count == 0 ? double.NaN : validStatistics.Average())
+        {
+            RawValues = (double[,])restored.Clone(),
+            BorderMask = borderMask,
+            AbnormalMask = abnormalMask,
+            UserMask = userMask,
+            AnalysisOptions = options
+        };
     }
 
     /// <summary>轮询一级文件夹，数量达到本次测试次数后再按每次完成时间选择最吻合的一批。</summary>
@@ -395,7 +676,8 @@ public static class CrosstalkDataProcessor
     }
 
     /// <summary>
-    /// ZIP 已能打开、Brightness 工作表存在且 C 列正好 612 行，才认为设备已经完成导出。
+    /// ZIP 已能打开、Brightness 工作表存在且 C 列至少有足够行数，才认为设备已经完成导出。
+    /// 最终是否能按参考 MATLAB 规则裁成 608 个采样点仍由 Calculate 严格校验。
     /// 文件刚创建但 XML 仍在写入时会返回 false，轮询下一次再试。
     /// </summary>
     private static bool FilesContainCompleteBrightnessData(
@@ -404,8 +686,8 @@ public static class CrosstalkDataProcessor
         try
         {
             return selected.All(item =>
-                SimpleXlsx.ReadNumericColumn(item.ExcelPath, "Brightness", 3).Length ==
-                ExpectedBrightnessRows);
+                SimpleXlsx.ReadNumericColumn(item.ExcelPath, "Brightness", 3).Length >=
+                HeatmapRows * HeatmapColumns + 4);
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException)
         {
@@ -482,7 +764,17 @@ public static class CrosstalkDataProcessor
     public static void WriteCrosstalkWorkbook(
         string path,
         CrosstalkCalculationResult calculation)
+        => WriteCrosstalkWorkbook(path, calculation, calculation.AnalysisOptions);
+
+    /// <summary>写出串扰统计工作簿，并将当前色轴、阈值和掩膜信息写入 Parameters。</summary>
+    public static void WriteCrosstalkWorkbook(
+        string path,
+        CrosstalkCalculationResult calculation,
+        CrosstalkAnalysisOptions? analysisOptions)
     {
+        ArgumentNullException.ThrowIfNull(calculation);
+        CrosstalkAnalysisOptions options = (analysisOptions ?? calculation.AnalysisOptions)
+            .Normalize();
         object?[,] statisticsValues = ToPercentageObjectMatrix(calculation.ValuesForStatistics);
         var summary = new object?[2, 3]
         {
@@ -493,11 +785,102 @@ public static class CrosstalkDataProcessor
                 RoundPercentage(calculation.Mean)
             }
         };
+        var parameters = new object?[10, 2]
+        {
+            { "Parameter", "Value" },
+            { "caxis_min_percent", options.ColorAxisMinimumPercent },
+            { "caxis_max_percent", options.ColorAxisMaximumPercent },
+            { "abnormal_threshold_ratio", options.AbnormalThresholdRatio },
+            { "abnormal_threshold_percent", options.AbnormalThresholdPercent },
+            { "user_mask_points", CrosstalkMaskStore.Count(calculation.UserMask) },
+            { "border_excluded_points", CountTrue(calculation.BorderMask) },
+            { "mask_name", options.MaskName },
+            { "mask_note", options.MaskNote },
+            { "export_time", DateTime.Now.ToString("O", CultureInfo.InvariantCulture) }
+        };
         SimpleXlsx.WriteWorkbook(path,
         [
             new XlsxSheetData("Sheet1", statisticsValues),
-            new XlsxSheetData("Sheet2", summary, FirstRowIsHeader: true)
+            new XlsxSheetData("Sheet2", summary, FirstRowIsHeader: true),
+            new XlsxSheetData("Parameters", parameters, FirstRowIsHeader: true)
         ]);
+    }
+
+    /// <summary>
+    /// 从已有结果重新应用参数，并导出不覆盖原结果的独立 XLSX/PNG。
+    /// outputDirectory 可以是自动测试结果目录，也可以是用户手动选择的数据目录。
+    /// </summary>
+    public static CrosstalkExportResult ExportCurrentResult(
+        string outputDirectory,
+        string folderName,
+        CrosstalkCalculationResult calculation,
+        CrosstalkAnalysisOptions? analysisOptions = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(folderName);
+        ArgumentNullException.ThrowIfNull(calculation);
+        Directory.CreateDirectory(outputDirectory);
+        CrosstalkAnalysisOptions options = (analysisOptions ?? calculation.AnalysisOptions)
+            .Normalize();
+        CrosstalkCalculationResult recalculated = Recalculate(calculation, options);
+        string safeFolder = SafeFileNamePart(folderName);
+        string safeMask = string.IsNullOrWhiteSpace(options.MaskName)
+            ? "custom"
+            : SafeFileNamePart(options.MaskName);
+        string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss_fff", CultureInfo.InvariantCulture);
+        // Include a short GUID suffix as a second-level collision guard.  A
+        // user can click Export repeatedly within the same millisecond, and
+        // each export must remain an independent result rather than silently
+        // overwriting the previous workbook/PNG.
+        string unique = Guid.NewGuid().ToString("N")[..8];
+        string baseName = $"crosstalk {safeFolder}_masked_{safeMask}_{stamp}_{unique}";
+        string workbookPath = Path.Combine(outputDirectory, baseName + ".xlsx");
+        string heatmapPath = Path.Combine(outputDirectory, baseName + ".png");
+        WriteCrosstalkWorkbook(workbookPath, recalculated, options);
+        WriteHeatmap(heatmapPath, folderName, recalculated.ValuesForHeatmap, options);
+        return new CrosstalkExportResult(workbookPath, heatmapPath, recalculated);
+    }
+
+    /// <summary>直接从 ExportFile 根目录计算并导出当前参数结果。</summary>
+    public static CrosstalkExportResult ExportCurrentFolderResult(
+        string sourceRoot,
+        string outputDirectory,
+        CrosstalkAnalysisOptions? analysisOptions = null)
+    {
+        CrosstalkFolderData folder = ReadBrightnessFolder(sourceRoot);
+        CrosstalkCalculationResult calculation = Calculate(folder.MergedData, analysisOptions);
+        Directory.CreateDirectory(outputDirectory);
+        string folderName = Path.GetFileName(
+            sourceRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(folderName)) folderName = "串扰结果";
+
+        // The reference analyzer writes an untouched merged matrix on every
+        // fresh calculation.  Keep that artifact as well, while the masked
+        // result remains in the independent file returned below.
+        string rawBaseName = $"orig{folder.ExcelFiles.Count}_output{SafeFileNamePart(folderName)}";
+        // Keep the familiar first filename, but never overwrite a previous
+        // manual calculation when the same folder is exported repeatedly.
+        // Selection and write happen under the same process-wide gate so two
+        // concurrent C# calls cannot claim the same suffix.
+        string rawPath;
+        lock (OutputDirectoryGate)
+        {
+            rawPath = CreateNonCollidingFilePath(outputDirectory, rawBaseName, ".xlsx");
+            SimpleXlsx.WriteWorkbook(rawPath,
+                [new XlsxSheetData("Sheet1", ToObjectMatrix(folder.MergedData))]);
+        }
+
+        return ExportCurrentResult(outputDirectory, folderName, calculation, analysisOptions);
+    }
+
+    private static string CreateNonCollidingFilePath(
+        string directory, string baseName, string extension)
+    {
+        string normalizedExtension = extension.StartsWith('.') ? extension : "." + extension;
+        string candidate = Path.Combine(directory, baseName + normalizedExtension);
+        for (int suffix = 1; File.Exists(candidate) || Directory.Exists(candidate); suffix++)
+            candidate = Path.Combine(directory, $"{baseName}_{suffix}{normalizedExtension}");
+        return candidate;
     }
 
     /// <summary>
@@ -505,7 +888,21 @@ public static class CrosstalkDataProcessor
     /// 深灰坐标区、19×32 刻度、无尾随零的三位小数、jet 色带和 NaN 图例均与参考图一致。
     /// </summary>
     public static void WriteHeatmap(string path, string folderName, double[,] heatmapValues)
+        => WriteHeatmap(path, folderName, heatmapValues, CrosstalkAnalysisOptions.Default);
+
+    /// <summary>按指定百分比色轴生成热力图；异常值仍绘制并按色轴钳制。</summary>
+    public static void WriteHeatmap(
+        string path,
+        string folderName,
+        double[,] heatmapValues,
+        CrosstalkAnalysisOptions? analysisOptions)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(heatmapValues);
+        string? parent = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(parent)) Directory.CreateDirectory(parent);
+        CrosstalkAnalysisOptions options = (analysisOptions ?? CrosstalkAnalysisOptions.Default)
+            .Normalize();
         if (heatmapValues.GetLength(0) != HeatmapRows ||
             heatmapValues.GetLength(1) != HeatmapColumns)
         {
@@ -579,12 +976,32 @@ public static class CrosstalkDataProcessor
                 int cellRight = plotLeft +
                     (int)Math.Round((column + 1) * plotWidth / (double)HeatmapColumns);
 
-                // NaN 表示不绘制的边框：不填色、不画格线，直接显示深灰坐标背景。
-                if (double.IsNaN(ratio)) continue;
-
+                // 非有限值表示无法绘制的采样点；边框/用户掩膜通常已经被写成 NaN，
+                // 其余的无穷值也不能被误画成红色热点。
                 var rectangle = new Rectangle(
                     cellLeft, cellTop, cellRight - cellLeft, cellBottom - cellTop);
-                Color color = JetColor(Math.Clamp(ratio * 100d / 3d, 0d, 1d));
+                if (!double.IsFinite(ratio))
+                {
+                    // Match the reference renderer's two missing-value
+                    // colours: user/border exclusions are dark gray, while
+                    // an otherwise invalid source sample is neutral gray.
+                    bool excluded = row == 0 || row == HeatmapRows - 1 ||
+                                    column == 0 || column == HeatmapColumns - 1 ||
+                                    (options.UserMask is not null && options.UserMask[row, column]);
+                    Color missingColor = excluded
+                        ? Color.FromArgb(35, 35, 35)
+                        : Color.FromArgb(90, 90, 90);
+                    using var missingBrush = new SolidBrush(missingColor);
+                    graphics.FillRectangle(missingBrush, rectangle);
+                    graphics.DrawRectangle(gridPen,
+                        rectangle.X, rectangle.Y, rectangle.Width, rectangle.Height);
+                    continue;
+                }
+
+                double percent = ratio * 100d;
+                double normalized = (percent - options.ColorAxisMinimumPercent) /
+                    (options.ColorAxisMaximumPercent - options.ColorAxisMinimumPercent);
+                Color color = CrosstalkColorMap.Jet(normalized);
                 using (var fill = new SolidBrush(color)) graphics.FillRectangle(fill, rectangle);
                 graphics.DrawRectangle(gridPen,
                     rectangle.X, rectangle.Y, rectangle.Width, rectangle.Height);
@@ -614,11 +1031,11 @@ public static class CrosstalkDataProcessor
                 axisFont, textBrush, columnLabelRectangle, center);
         }
 
-        // MATLAB caxis([0,3]) 对应右侧 0~3 色条；超过 3% 的异常值仍绘制并钳制为深红色。
+        // 色条对应用户设置的百分比色轴；超出范围的值仍绘制并钳制到两端颜色。
         for (int pixel = 1; pixel < colorBarHeight - 1; pixel++)
         {
             double normalized = 1d - (pixel - 1d) / (colorBarHeight - 3d);
-            using var pen = new Pen(JetColor(normalized));
+            using var pen = new Pen(CrosstalkColorMap.Jet(normalized));
             graphics.DrawLine(pen,
                 colorBarLeft + 1, plotTop + pixel,
                 colorBarLeft + colorBarWidth - 2, plotTop + pixel);
@@ -626,11 +1043,14 @@ public static class CrosstalkDataProcessor
         graphics.DrawRectangle(gridPen,
             colorBarLeft, plotTop, colorBarWidth - 1, colorBarHeight - 1);
 
-        // MATLAB 参考图按 0.5 递增显示 0、0.5、1……3，数值本身已经代表百分比，不再附加 %。
-        for (int tick = 0; tick <= 6; tick++)
+        // 显示 6 个等距刻度（含两端）；数值本身已经代表百分比，不再附加 %。
+        const int tickCount = 6;
+        for (int tick = 0; tick <= tickCount; tick++)
         {
-            double tickValue = tick / 2d;
-            float y = plotTop + (colorBarHeight - 1) * (float)(1d - tickValue / 3d);
+            double tickValue = options.ColorAxisMinimumPercent +
+                (options.ColorAxisMaximumPercent - options.ColorAxisMinimumPercent) *
+                tick / (double)tickCount;
+            float y = plotTop + (colorBarHeight - 1) * (float)(1d - tick / (double)tickCount);
             graphics.DrawLine(gridPen,
                 colorBarLeft + colorBarWidth - 1, y,
                 colorBarLeft + colorBarWidth + 11, y);
@@ -651,35 +1071,50 @@ public static class CrosstalkDataProcessor
         bitmap.Save(path, ImageFormat.Png);
     }
 
-    /// <summary>MATLAB jet 色带的近似公式，输入 0 为蓝色、0.5 为绿黄、1 为红色。</summary>
-    private static Color JetColor(double value)
+    private static int CountTrue(bool[,] values)
     {
-        double red = Math.Clamp(1.5 - Math.Abs(4 * value - 3), 0, 1);
-        double green = Math.Clamp(1.5 - Math.Abs(4 * value - 2), 0, 1);
-        double blue = Math.Clamp(1.5 - Math.Abs(4 * value - 1), 0, 1);
-        return Color.FromArgb(
-            (int)Math.Round(red * 255),
-            (int)Math.Round(green * 255),
-            (int)Math.Round(blue * 255));
+        int count = 0;
+        foreach (bool value in values) if (value) count++;
+        return count;
+    }
+
+    private static string SafeFileNamePart(string value)
+    {
+        var invalid = new HashSet<char>(Path.GetInvalidFileNameChars());
+        var builder = new StringBuilder(value.Length);
+        foreach (char character in value.Trim())
+            builder.Append(invalid.Contains(character) ? '_' : character);
+        string result = builder.ToString().Trim(' ', '.', '_');
+        return string.IsNullOrWhiteSpace(result) ? "result" : result;
     }
 
     private static double DivideLikeMatlab(double numerator, double denominator)
     {
+        // IEEE/NumPy division propagates NaN even when the denominator is
+        // zero.  Check this before the explicit zero-denominator branch;
+        // otherwise NaN/0 would be misclassified as -Infinity and then
+        // converted to the 100 sentinel below.
+        if (double.IsNaN(numerator) || double.IsNaN(denominator)) return double.NaN;
         if (denominator != 0) return numerator / denominator;
         if (numerator == 0) return double.NaN;
         return numerator > 0 ? double.PositiveInfinity : double.NegativeInfinity;
     }
 
-    /// <summary>MATLAB min 默认传播 NaN；没有 NaN 时取普通最小值。</summary>
+    /// <summary>
+    /// 与参考 Python/NumPy 实现一致：每一行忽略 NaN 后取最小值，
+    /// 但保留正负无穷（负无穷会在上层按 MATLAB 规则替换为 100）。
+    /// </summary>
     private static double MinimumIncludingNaN(IEnumerable<double> values)
     {
         double minimum = double.PositiveInfinity;
+        bool found = false;
         foreach (double value in values)
         {
-            if (double.IsNaN(value)) return double.NaN;
+            if (double.IsNaN(value)) continue;
+            found = true;
             if (value < minimum) minimum = value;
         }
-        return minimum;
+        return found ? minimum : double.NaN;
     }
 
     private static object?[,] ToObjectMatrix(double[,] source)
@@ -703,7 +1138,7 @@ public static class CrosstalkDataProcessor
             for (int column = 0; column < source.GetLength(1); column++)
             {
                 double value = source[row, column];
-                result[row, column] = double.IsNaN(value) ? null : RoundPercentage(value);
+                result[row, column] = double.IsFinite(value) ? RoundPercentage(value) : null;
             }
         }
         return result;

@@ -41,10 +41,75 @@ for (int row = 0; row < crosstalkInput.GetLength(0); row++)
 var crosstalk = CrosstalkDataProcessor.Calculate(crosstalkInput);
 Check(crosstalk.ValuesForStatistics.GetLength(0) == 19 && crosstalk.ValuesForStatistics.GetLength(1) == 32, "串扰矩阵 19x32");
 Check(Math.Abs(crosstalk.Mean - 0.01) < 1e-9, "串扰比值和 3% 异常阈值");
+Check(CrosstalkColorMap.Jet(0d) == Color.FromArgb(0, 0, 255) &&
+      CrosstalkColorMap.Jet(1d) == Color.FromArgb(255, 0, 0),
+    "参考色带端点颜色（C#）");
+
+// 参考分析器会先执行 values[1:-3]，再裁掉首尾纯 NaN 行；验证
+// C# 入口允许导出表带有额外的尾部空白行，同时仍严格要求 608 个点。
+var crosstalkWithTrailingBlank = new double[613, 3];
+for (int row = 0; row < crosstalkWithTrailingBlank.GetLength(0); row++)
+{
+    crosstalkWithTrailingBlank[row, 0] = 10.01;
+    crosstalkWithTrailingBlank[row, 1] = 11.0;
+    crosstalkWithTrailingBlank[row, 2] = 10.0;
+}
+for (int row = 609; row < crosstalkWithTrailingBlank.GetLength(0); row++)
+    for (int column = 0; column < crosstalkWithTrailingBlank.GetLength(1); column++)
+        crosstalkWithTrailingBlank[row, column] = double.NaN;
+var trimmedCrosstalk = CrosstalkDataProcessor.Calculate(crosstalkWithTrailingBlank);
+Check(trimmedCrosstalk.ValuesForStatistics.GetLength(0) == 19 &&
+      trimmedCrosstalk.ValuesForStatistics.GetLength(1) == 32,
+    "串扰兼容额外尾部 NaN 行并裁成 608 点");
+
+var signal = new[,] { { 2d, 0d }, { double.NaN, 3d } };
+var reference = new[,] { { 1d, 0d }, { 1d, 3d } };
+var genericCrosstalk = CrosstalkDataProcessor.CalculateCrosstalk(signal, reference);
+Check(Math.Abs(genericCrosstalk[0, 0] - 100d) < 1e-9 &&
+      double.IsNaN(genericCrosstalk[0, 1]) &&
+      double.IsNaN(genericCrosstalk[1, 0]) &&
+      Math.Abs(genericCrosstalk[1, 1]) < 1e-9,
+    "通用 C# 相对串扰 API");
+var mismatchedReference = new double[1, 1];
+bool mismatchRejected = false;
+try { _ = CrosstalkDataProcessor.CalculateCrosstalk(signal, mismatchedReference); }
+catch (InvalidDataException) { mismatchRejected = true; }
+Check(mismatchRejected, "通用串扰 API 拒绝尺寸不一致");
+
+var mismatchedMasks = new CrosstalkCalculationResult(
+    new double[1, 1], new double[1, 1], 0, 0, 0)
+{
+    AbnormalMask = new[,] { { true } },
+    BorderMask = new bool[0, 0],
+    UserMask = new bool[2, 2]
+};
+Check(mismatchedMasks.AbnormalPointCount == 1, "异常点计数对掩膜尺寸不匹配安全");
 await CrosstalkDataSmokeTests.RunAsync(Check);
+CrosstalkMatrixReaderSmokeTests.Run(Check);
 Check(MessageProtocol.GetResponseTimeout(MessageProtocol.DefaultMeasurementRequest) == TimeSpan.FromSeconds(600), "测量等待上限 600 秒");
 var defaults = new TestPlanConfiguration(); defaults.Normalize();
 Check(defaults.Projects.Count == 5 && defaults.Projects[0].Kind == TestProjectKind.Fov && defaults.Projects[^1].Kind == TestProjectKind.Crosstalk, "默认项目顺序");
+Check(defaults.ExportDirectory == TestPlanConfiguration.DefaultMrTestExportDirectory,
+    "默认 MRTEST 导出目录使用新版路径");
+ResultDisplayRuleSmokeTests.Run(Check);
+
+var namedPlanConfiguration = new TestPlanConfiguration();
+namedPlanConfiguration.Normalize();
+NamedTestPlan firstNamedPlan = NamedTestPlan.Capture(namedPlanConfiguration, "计划A");
+namedPlanConfiguration.WholePlanRepeatCount = 3;
+namedPlanConfiguration.Projects[0].RepeatCount = 4;
+namedPlanConfiguration.DisplayRules[0].DataCellOrRange = "C40";
+NamedTestPlan secondNamedPlan = NamedTestPlan.Capture(namedPlanConfiguration, "计划B");
+firstNamedPlan.ApplyTo(namedPlanConfiguration);
+bool firstApplied = namedPlanConfiguration.WholePlanRepeatCount == 1 &&
+                    namedPlanConfiguration.Projects[0].RepeatCount == 1 &&
+                    namedPlanConfiguration.DisplayRules[0].DataCellOrRange == "C4";
+secondNamedPlan.ApplyTo(namedPlanConfiguration);
+bool secondApplied = namedPlanConfiguration.WholePlanRepeatCount == 3 &&
+                     namedPlanConfiguration.Projects[0].RepeatCount == 4 &&
+                     namedPlanConfiguration.DisplayRules[0].DataCellOrRange == "C40";
+Check(firstApplied && secondApplied && firstNamedPlan.Name == "计划A" &&
+      secondNamedPlan.Name == "计划B", "命名测试计划可独立保存并切换项目/规则快照");
 
 var logBuffer = new LogLineBuffer(cleanupThreshold: 200, retainedAfterCleanup: 150);
 bool cleanupTriggered = false;

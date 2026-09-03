@@ -14,7 +14,7 @@
     <UseSystemDrawing>true</UseSystemDrawing>
     <AssemblyName>AutoTestClient</AssemblyName>
     <RootNamespace>AutoTestClient</RootNamespace>
-    <Version>0.1.1</Version>
+    <Version>0.3.0</Version>
     <AssemblyTitle>一键光学测试客户端</AssemblyTitle>
     <Product>一键光学测试客户端</Product>
     <Platforms>AnyCPU;x64</Platforms>
@@ -57,6 +57,28 @@
     </Compile>
     <EmbeddedResource Update="CrosstalkResultForm.resx">
       <DependentUpon>CrosstalkResultForm.cs</DependentUpon>
+    </EmbeddedResource>
+
+    <Compile Update="TestDataDisplayRuleForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="TestDataDisplayRuleForm.Designer.cs">
+      <DependentUpon>TestDataDisplayRuleForm.cs</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+    <EmbeddedResource Update="TestDataDisplayRuleForm.resx">
+      <DependentUpon>TestDataDisplayRuleForm.cs</DependentUpon>
+    </EmbeddedResource>
+
+    <Compile Update="NamedTestPlanNameForm.cs">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Update="NamedTestPlanNameForm.Designer.cs">
+      <DependentUpon>NamedTestPlanNameForm.cs</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+    <EmbeddedResource Update="NamedTestPlanNameForm.resx">
+      <DependentUpon>NamedTestPlanNameForm.cs</DependentUpon>
     </EmbeddedResource>
   </ItemGroup>
 </Project>

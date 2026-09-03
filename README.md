@@ -1,6 +1,6 @@
-# 一键光学测试客户端（v0.1.1）
+# 一键光学测试客户端（v0.3.0）
 
-当前源码版本：`v0.1.1`。
+当前源码版本：`v0.3.0`。
 
 这是一个 .NET 8 / C# WinForms EXE。程序自身是 TCP **服务端监听者**，MRTEST/测量设备作为 TCP 客户端连接到本机；发送的默认手动单次测量报文严格为：
 
@@ -23,7 +23,8 @@
 - TCP 服务端实际成功发送的每条协议报文都会写入主界面的“发送：…”日志；设备返回的每条完整报文写入“收到：…”日志，便于逐条核对命令和最终响应。手动报文框中的历史默认请求也会在真正发送前迁移，日志中不会出现旧的 `M|Run` 请求。
 - 串扰保留参考项目的完整流程：前景图按可配置起点循环、最后一张为本底；普通模式等待每张图的最终 OK 后再切下一张，弹窗模式则在每张命令事务内处理确认窗口；导出文件夹快照、稳定性检查、Brightness C 列合并、19×32 矩阵、边框/3% 异常值处理、Excel/CSV/热图输出均保留。每次重复都会分配独立结果目录并归档原始数据，主界面下拉框可分别查看同一计划产生的多批热图。
 - 项目编辑器删除项目时只显示一次确认框，删除后按对象重排项目/图卡序号；通过下方绑定面板选择图卡或直接编辑路径时，会立即同步左侧图卡路径、当前绑定标签和预览，避免重绑事件覆盖新值。
-- FOV、黑白对比度、亮度均匀性、色域已接入统一结果表，但字段位置尚未凭现场文件确认，因此显示“待确认”，不会伪造数值。后续只需在 `DataProcessing` 中增加对应处理器。
+- FOV、黑白对比度、亮度均匀性、色域和畸变已接入统一结果表。每个非串扰项目完成后，数据处理层会递归扫描 `ExportFile`，优先读取 MRTEST 生成的最深层明细 `.xlsx/.xlsm`，不会把外层汇总表当成结果明细；测试开始前已有的旧工作簿会被指纹排除，避免重复测试读到上一批结果。当前内置规则如下：FOV 读取 B4/B5 对应的 C4/C5；黑白对比度计算 C4:C12、C13:C21 平均值并读取 B31/C31；亮度均匀性读取 B13/C13、B16/C16；色域读取 H3/H4、B23/C23（现场工作簿没有 C24 时的兼容位置）；畸变读取 B52/C52、B61/C61、B62/C62。串扰不生成普通指标行，只保留参考算法使用的 Brightness 数据、独立矩阵、Excel/CSV 和热力图结果。规则中的“名称单元格/固定标签”和“数据单元格/范围”都可在主界面的“数据展示规则”按钮中修改，输出列非空时作为友好的显示名称，清空输出列即可直接显示 Excel 名称；可新增、删除、启用/禁用和调整顺序，无需修改代码。
+- 一键测试计划支持多个命名快照。计划栏中的下拉框可切换项目、图卡绑定、重复次数、弹窗/投影参数、串扰分析参数和数据展示规则；“保存”更新当前计划，“另存”创建另一套计划，“删除”移除当前计划。计划切换前会提示处理未保存的编辑。
 
 ## 运行步骤
 
@@ -42,10 +43,10 @@
 ```powershell
 dotnet build AutoTestClient.sln -c Release
 dotnet run --project AutoTestClient.SmokeTests\AutoTestClient.SmokeTests.csproj -c Release
-dotnet publish AutoTestClient\AutoTestClient.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish\win-x64
+dotnet publish AutoTestClient\AutoTestClient.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:Version=0.3.0 -o "AutoTestClient\bin\Release\自动测试v0.3.0"
 ```
 
-发布目录中的 `AutoTestClient.exe` 可直接拷贝到测试机。此前已在真实 MRTEST 上完成黑白对比度和 FOV/9Point 弹窗、投图、BM_CLICK、Run→OK 与导出文件验收；`v0.1.1` 收紧监视生命周期并增加日志/计划列表回归测试。本轮在此基础上补充串扰逐图弹窗事务、重复结果隔离和编辑器重绑保护；串扰仍建议先用一轮/一次进行现场验收。
+发布目录中的 `AutoTestClient.exe` 可直接拷贝到测试机。此前已在真实 MRTEST 上完成黑白对比度和 FOV/9Point 弹窗、投图、BM_CLICK、Run→OK 与导出文件验收；v0.3.0 在此基础上补充串扰逐图弹窗事务、重复结果隔离、可编辑 Excel 展示规则、深层明细定位和多套命名测试计划；串扰仍建议先用一轮/一次进行现场验收。
 
 ## 目录说明
 
@@ -53,7 +54,7 @@ dotnet publish AutoTestClient\AutoTestClient.csproj -c Release -r win-x64 --self
 - `AutoTestClient/Networking`：单客户端 TCP 服务端、写锁、事务锁、断线/超时处理。
 - `AutoTestClient/Monitoring`：MRTEST 确认窗口轮询、主窗口排除和按钮/Enter/关闭回退操作。
 - `AutoTestClient/Workflow`：整套/项目重复、配方切换、固定弹窗队列、串扰顺序。
-- `AutoTestClient/DataProcessing`：串扰完整算法和其他项目的字段预留入口。
+- `AutoTestClient/DataProcessing`：纯 C# 串扰算法、深层 XLSX/XML 读取器、可编辑结果展示规则和统一数据处理入口。
 - `AutoTestClient.SmokeTests`：不依赖 MRTEST 的协议、粘包、持久化和回环 TCP 冒烟测试。
 
 ## 在 Visual Studio 中调整界面

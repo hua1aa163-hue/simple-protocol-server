@@ -147,9 +147,13 @@ public sealed class TestPlanRunner : IAsyncDisposable
             Report(TestRunState.Running, round, configuration.WholePlanRepeatCount, project.Name,
                 iteration, repeats, $"开始项目第 {iteration}/{repeats} 次");
             DateTime startedUtc = DateTime.UtcNow;
+            // Capture the pre-test workbook state for every built-in result
+            // path.  Crosstalk uses the existing folder fingerprint; the
+            // non-crosstalk Excel reader additionally excludes unchanged
+            // workbooks so a repeated project cannot display the prior run.
             ExportSnapshot? snapshot = project.Kind == TestProjectKind.Crosstalk
                 ? _dataProcessor.CaptureExportSnapshot(configuration.ExportDirectory)
-                : null;
+                : _dataProcessor.CaptureResultSnapshot(configuration.ExportDirectory);
             var records = new List<TestMeasurementRecord>();
 
             // MRTEST 的 FOV 与 9 点亮度均匀性配方本身就是 9Point
@@ -185,6 +189,16 @@ public sealed class TestPlanRunner : IAsyncDisposable
                     .ConfigureAwait(false);
             }
 
+            CrosstalkAnalysisOptions? analysisOptions = null;
+            if (project.Kind == TestProjectKind.Crosstalk)
+            {
+                bool[,]? userMask = string.IsNullOrWhiteSpace(configuration.CrosstalkMaskCoordinates)
+                    ? null
+                    : CrosstalkMaskStore.ParseCoordinateRanges(configuration.CrosstalkMaskCoordinates);
+                analysisOptions = configuration.CreateCrosstalkAnalysisOptions(
+                    userMask,
+                    configuration.CrosstalkMaskName);
+            }
             TestDataProcessingResult result = await _dataProcessor.ProcessAsync(
                 project,
                 configuration.ExportDirectory,
@@ -193,7 +207,9 @@ public sealed class TestPlanRunner : IAsyncDisposable
                 records,
                 new Progress<string>(message => _ = _log(message)),
                 cancellationToken,
-                snapshot).ConfigureAwait(false);
+                snapshot,
+                analysisOptions,
+                configuration.DisplayRules).ConfigureAwait(false);
             DataResultProduced?.Invoke(this, result);
             foreach (TestMetric metric in result.Metrics)
                 await _log($"{project.Name} / {metric.DisplayName}：{metric.Value} [{metric.Status}]").ConfigureAwait(false);
@@ -302,111 +318,114 @@ public sealed class TestPlanRunner : IAsyncDisposable
             await _log($"串扰图卡 {position}/{ordered.Count}：图卡已切换：{imagePath}")
                 .ConfigureAwait(false);
 
-            // 监视器必须在发送前启动并且协调器必须先 Arm，避免 MRTEST
-            // 在发送后立即弹窗时事件先于订阅而丢失。普通弹窗项目仍走
-            // RunPopupProjectAsync，不受此逐图分支影响。
-            await StartDialogMonitoringAsync(configuration).ConfigureAwait(false);
+            string request = NormalizeRequest(sourceStep.MeasurementRequest);
+            using var popupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var runReceived = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var finalResponseAtUtc = new TaskCompletionSource<DateTime>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            // Link the intermediate-state gate to the transaction token.
+            // On timeout, disconnect, stop, or cancellation there may be
+            // no future Run packet; canceling this TCS keeps the failure
+            // path from waiting forever for an impossible event.
+            using CancellationTokenRegistration stageCancellation =
+                popupCancellation.Token.Register(() =>
+                {
+                    runReceived.TrySetCanceled(popupCancellation.Token);
+                    finalResponseAtUtc.TrySetCanceled(popupCancellation.Token);
+                });
+            bool transactionArmed = false;
+            EventHandler<string>? stageObserver = null;
+            stageObserver = (_, response) =>
+            {
+                // The server serializes request/response transactions, but
+                // keep an explicit arm flag so a queued packet from the
+                // previous transaction cannot satisfy this image's gate.
+                if (!Volatile.Read(ref transactionArmed)) return;
+                if (CommandResponseMatcher.IsIntermediate(request, response))
+                {
+                    if (runReceived.TrySetResult(true))
+                        _ = _log($"串扰图卡 {position}/{ordered.Count}：收到 Run 中间返回：{response}");
+                }
+                else if (CommandResponseMatcher.Classify(request, response) == ResponseClassification.Success)
+                {
+                    finalResponseAtUtc.TrySetResult(DateTime.UtcNow);
+                }
+            };
+
+            // Subscribe both the TCP stage observer and the popup coordinator
+            // before starting the monitor.  Otherwise the monitor can publish
+            // a fast first dialog during its initial polling cycles while no
+            // consumer is attached, leaving this image waiting until timeout.
+            _server.MessageReceived += stageObserver;
             try
             {
-                string request = NormalizeRequest(sourceStep.MeasurementRequest);
-                using var popupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var runReceived = new TaskCompletionSource<bool>(
-                    TaskCreationOptions.RunContinuationsAsynchronously);
-                var finalResponseAtUtc = new TaskCompletionSource<DateTime>(
-                    TaskCreationOptions.RunContinuationsAsynchronously);
-                // Link the intermediate-state gate to the transaction token.
-                // On timeout, disconnect, stop, or cancellation there may be
-                // no future Run packet; canceling this TCS keeps the failure
-                // path from waiting forever for an impossible event.
-                using CancellationTokenRegistration stageCancellation =
-                    popupCancellation.Token.Register(() =>
-                    {
-                        runReceived.TrySetCanceled(popupCancellation.Token);
-                        finalResponseAtUtc.TrySetCanceled(popupCancellation.Token);
-                    });
-                bool transactionArmed = false;
-                EventHandler<string>? stageObserver = null;
-                stageObserver = (_, response) =>
+                await using var coordinator = new FixedPopupSequenceCoordinator(
+                    _monitor,
+                    _projector,
+                    _log,
+                    configuration.ProjectionMode,
+                    popupTimeout,
+                    projectOnDialog: false,
+                    beforeConfirm: configuration.AutoConfirmPopups
+                        ? token => runReceived.Task.WaitAsync(token)
+                        : null);
+
+                // 图卡已经在发送前投影；协调器只负责消费一个弹窗并执行
+                // 确定/Enter/关闭回退，不再次切换屏幕内容。
+                var popupStep = new TestStep
                 {
-                    // The server serializes request/response transactions, but
-                    // keep an explicit arm flag so a queued packet from the
-                    // previous transaction cannot satisfy this image's gate.
-                    if (!Volatile.Read(ref transactionArmed)) return;
-                    if (CommandResponseMatcher.IsIntermediate(request, response))
-                    {
-                        if (runReceived.TrySetResult(true))
-                            _ = _log($"串扰图卡 {position}/{ordered.Count}：收到 Run 中间返回：{response}");
-                    }
-                    else if (CommandResponseMatcher.Classify(request, response) == ResponseClassification.Success)
-                    {
-                        finalResponseAtUtc.TrySetResult(DateTime.UtcNow);
-                    }
+                    Order = sourceStep.Order,
+                    Name = sourceStep.Name,
+                    ImagePath = imagePath,
+                    StabilizeDelayMs = 0,
+                    MeasurementRequest = sourceStep.MeasurementRequest
                 };
-                _server.MessageReceived += stageObserver;
-                try
-                {
-                    await using var coordinator = new FixedPopupSequenceCoordinator(
-                        _monitor,
-                        _projector,
-                        _log,
-                        configuration.ProjectionMode,
-                        popupTimeout,
-                        projectOnDialog: false,
-                        beforeConfirm: configuration.AutoConfirmPopups
-                            ? token => runReceived.Task.WaitAsync(token)
-                            : null);
+                coordinator.Arm(new[] { popupStep }, configuration.AutoConfirmPopups, popupCancellation.Token);
 
-                    // 图卡已经在发送前投影；协调器只负责消费一个弹窗并执行
-                    // 确定/Enter/关闭回退，不再次切换屏幕内容。
-                    var popupStep = new TestStep
-                    {
-                        Order = sourceStep.Order,
-                        Name = sourceStep.Name,
-                        ImagePath = imagePath,
-                        StabilizeDelayMs = 0,
-                        MeasurementRequest = sourceStep.MeasurementRequest
-                    };
-                    coordinator.Arm(new[] { popupStep }, configuration.AutoConfirmPopups, popupCancellation.Token);
+                // Arm/subscribe first, then open the per-command monitoring
+                // window.  Start intentionally snapshots dialogs already on
+                // screen; requeue them once so an MRTEST confirmation that
+                // appeared at the boundary is not suppressed as an old dialog.
+                await StartDialogMonitoringAsync(configuration).ConfigureAwait(false);
+                _monitor.RequeueCurrentDialogs();
 
-                    await _log($"串扰图卡 {position}/{ordered.Count}：发送测量：{request}；等待 Run/弹窗确认/最终 OK")
-                        .ConfigureAwait(false);
-                    // Arm the stage observer immediately before the send.  It is
-                    // already subscribed, so a very fast Run/OK response cannot
-                    // race subscription; the flag still rejects pre-send noise.
-                    Volatile.Write(ref transactionArmed, true);
-                    Task<string> responseTask = _server.SendAndWaitForCompletionAsync(
-                        request, popupTimeout, popupCancellation.Token);
-                    Task popupTask = coordinator.Completion;
-                    DateTime completedUtc = await AwaitCrosstalkPopupAndResponseAsync(
-                        responseTask,
-                        popupTask,
-                        configuration.AutoConfirmPopups
-                            ? runReceived.Task
-                            : null,
-                        finalResponseAtUtc.Task,
-                        popupTimeout,
-                        popupCancellation,
-                        coordinator,
-                        position,
-                        ordered.Count).ConfigureAwait(false);
+                await _log($"串扰图卡 {position}/{ordered.Count}：发送测量：{request}；等待 Run/弹窗确认/最终 OK")
+                    .ConfigureAwait(false);
+                // Arm the stage observer immediately before the send.  It is
+                // already subscribed, so a very fast Run/OK response cannot
+                // race subscription; the flag still rejects pre-send noise.
+                Volatile.Write(ref transactionArmed, true);
+                Task<string> responseTask = _server.SendAndWaitForCompletionAsync(
+                    request, popupTimeout, popupCancellation.Token);
+                Task popupTask = coordinator.Completion;
+                DateTime completedUtc = await AwaitCrosstalkPopupAndResponseAsync(
+                    responseTask,
+                    popupTask,
+                    configuration.AutoConfirmPopups
+                        ? runReceived.Task
+                        : null,
+                    finalResponseAtUtc.Task,
+                    popupTimeout,
+                    popupCancellation,
+                    coordinator,
+                    position,
+                    ordered.Count).ConfigureAwait(false);
 
-                    records.Add(new TestMeasurementRecord(++sequence, project.Name, imagePath, completedUtc));
-                    await _log($"串扰图卡 {position}/{ordered.Count}：已收到最终 OK（{completedUtc.ToLocalTime():HH:mm:ss.fff}），进入下一张。")
-                        .ConfigureAwait(false);
-                }
-                finally
-                {
-                    // Always detach the per-transaction observer, including
-                    // validation/send/timeout failures; otherwise a later
-                    // image could consume an old closure and leak handlers.
-                    Volatile.Write(ref transactionArmed, false);
-                    _server.MessageReceived -= stageObserver;
-                }
+                records.Add(new TestMeasurementRecord(++sequence, project.Name, imagePath, completedUtc));
+                await _log($"串扰图卡 {position}/{ordered.Count}：已收到最终 OK（{completedUtc.ToLocalTime():HH:mm:ss.fff}），进入下一张。")
+                    .ConfigureAwait(false);
             }
             finally
             {
+                // Always detach the per-transaction observer, including
+                // validation/send/timeout failures; otherwise a later image
+                // could consume an old closure and leak handlers.
+                Volatile.Write(ref transactionArmed, false);
+                _server.MessageReceived -= stageObserver;
                 // StopAsync 会等待轮询任务退出并清除已见句柄；这一步放在
-                // 每个命令事务末尾，防止上一张弹窗影响下一张图卡。
+                // 每个命令事务末尾，防止上一张弹窗影响下一张图卡。即使
+                // StartDialogMonitoringAsync 在日志阶段抛错，也会安全清理。
                 await StopDialogMonitoringAsync(logWhenStopped: true).ConfigureAwait(false);
             }
 
@@ -510,17 +529,24 @@ public sealed class TestPlanRunner : IAsyncDisposable
             }).ToArray();
         if (steps.Count == 0) throw new InvalidOperationException($"弹窗项目“{project.Name}”没有固定图卡步骤。");
         TimeSpan popupTimeout = TimeSpan.FromSeconds(Math.Clamp(project.PopupTimeoutSeconds, 1, 600));
+        // Subscribe and arm the coordinator before starting the polling task.
+        // A very fast MRTEST build can create its first confirmation window
+        // immediately after the request; starting the monitor first used to
+        // leave a small interval in which that event was published with no
+        // consumer.  RequeueCurrentDialogs below also covers a dialog that
+        // appeared between Start()'s initial snapshot and this call.
+        using var popupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        await using var coordinator = new FixedPopupSequenceCoordinator(
+            _monitor,
+            _projector,
+            _log,
+            configuration.ProjectionMode,
+            popupTimeout);
+        coordinator.Arm(steps, configuration.AutoConfirmPopups, popupCancellation.Token);
         await StartDialogMonitoringAsync(configuration).ConfigureAwait(false);
+        _monitor.RequeueCurrentDialogs();
         try
         {
-            await using var coordinator = new FixedPopupSequenceCoordinator(
-                _monitor,
-                _projector,
-                _log,
-                configuration.ProjectionMode,
-                popupTimeout);
-            using var popupCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            coordinator.Arm(steps, configuration.AutoConfirmPopups, popupCancellation.Token);
             string request = NormalizeRequest(steps[0].MeasurementRequest);
             await _log($"发送测量：{request}；等待最终完成返回（最长 {popupTimeout.TotalSeconds:0} 秒）")
                 .ConfigureAwait(false);

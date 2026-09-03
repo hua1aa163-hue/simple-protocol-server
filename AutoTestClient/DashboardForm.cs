@@ -1,5 +1,7 @@
 using System.Net;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Globalization;
 using AutoTestClient.Models;
 using AutoTestClient.Logging;
 using AutoTestClient.Monitoring;
@@ -8,6 +10,8 @@ using AutoTestClient.Projection;
 using AutoTestClient.Protocol;
 using AutoTestClient.Settings;
 using AutoTestClient.Workflow;
+using AutoTestClient.Controls;
+using AutoTestClient.DataProcessing;
 
 namespace AutoTestClient;
 
@@ -20,6 +24,7 @@ public partial class DashboardForm : Form
     private readonly TcpMessageServer _server = new();
     private readonly MrTestDialogMonitor _monitor = new();
     private readonly ScreenImageProjector _projector;
+    private readonly TestDataProcessingService _dataProcessor = new();
     private TestPlanConfiguration _configuration = new();
     private TestPlanRunner? _runner;
     private Task? _runTask;
@@ -27,6 +32,10 @@ public partial class DashboardForm : Form
     // 一轮中可能产生多个串扰热图；保留每一批的结果对象，允许测试结束后逐个查看。
     // 结果目录由数据处理层独立创建，这里只保存引用，不复制或覆盖任何文件。
     private readonly List<CrosstalkResultEntry> _crosstalkResultHistory = new();
+    // 当前主界面热图的原始矩阵和参数；原始矩阵保留后，修改阈值/色轴/掩膜
+    // 时只需重新计算，不必重新触发 MRTEST 测量。
+    private CrosstalkCalculationResult? _crosstalkCalculation;
+    private CrosstalkAnalysisOptions? _crosstalkAnalysisOptions;
     // 手动报文是异步事务；在收到最终应答前禁止再次点击，避免重复测量。
     private bool _manualSendInProgress;
     // 独立记录一键测试状态，避免手动事务结束时覆盖 SetRunningUi 的禁用状态。
@@ -42,6 +51,7 @@ public partial class DashboardForm : Form
     {
         InitializeComponent();
         _projector = new ScreenImageProjector(SynchronizationContext.Current);
+        heatmapPreview.MaskSelected += HeatmapPreview_MaskSelected;
         if (IsInDesigner()) return;
         _server.ClientConnected += Server_ClientConnected;
         _server.MessageSent += Server_MessageSent;
@@ -58,6 +68,7 @@ public partial class DashboardForm : Form
         if (IsInDesigner()) return;
         _configuration = _settingsStore.Load();
         ApplyConfigurationToControls();
+        InitializeNamedPlans();
         AppendLog($"配置文件：{_settingsStore.FilePath}");
         AppendLog("已加载首版测试计划。TCP 角色为服务端，等待 MRTEST/设备客户端连接。");
         AppendLog($"测量请求固定默认值：{MessageProtocol.DefaultMeasurementRequest}；完成等待上限：600 秒。");
@@ -81,6 +92,10 @@ public partial class DashboardForm : Form
         numericProjectRepeat.Value = Math.Clamp(_configuration.DefaultProjectRepeatCount, 1, 9999);
         comboProjectionMode.SelectedIndex = _configuration.ProjectionMode == ProjectionMode.FitToWindow ? 1 : 0;
         checkAutoConfirm.Checked = _configuration.AutoConfirmPopups;
+        heatmapPreview.ColorMinimumPercent = _configuration.CrosstalkColorAxisMinimumPercent;
+        heatmapPreview.ColorMaximumPercent = _configuration.CrosstalkColorAxisMaximumPercent;
+        heatmapPreview.AnomalyThresholdPercent = _configuration.CrosstalkAbnormalThresholdRatio * 100d;
+        SetCrosstalkThresholdControlValue(heatmapPreview.AnomalyThresholdPercent);
         checkedListProjects.Items.Clear();
         foreach (TestProject project in _configuration.Projects.OrderBy(p => p.Order))
             checkedListProjects.Items.Add($"{project.Order}. {project.Name} [{project.KindDisplayName}] ×{project.RepeatCount}", project.Enabled);
@@ -105,6 +120,21 @@ public partial class DashboardForm : Form
         _configuration.PopupStabilizeDelayMs = (int)numericPopupDelay.Value;
         _configuration.AutoConfirmPopups = checkAutoConfirm.Checked;
         _configuration.ProjectionMode = comboProjectionMode.SelectedIndex == 1 ? ProjectionMode.FitToWindow : ProjectionMode.PixelPerfect;
+        // 串扰参数由完整分析窗口维护；这里仍把当前预览属性写回，保证设计器/运行时
+        // 调整后的值会随主窗口关闭保存。
+        if (double.IsFinite(heatmapPreview.AnomalyThresholdPercent))
+            _configuration.CrosstalkAbnormalThresholdRatio = heatmapPreview.AnomalyThresholdPercent / 100d;
+        if (numericCrosstalkThreshold is not null &&
+            double.IsFinite((double)numericCrosstalkThreshold.Value))
+        {
+            _configuration.CrosstalkAbnormalThresholdRatio =
+                (double)numericCrosstalkThreshold.Value / 100d;
+            heatmapPreview.AnomalyThresholdPercent = (double)numericCrosstalkThreshold.Value;
+        }
+        if (double.IsFinite(heatmapPreview.ColorMinimumPercent))
+            _configuration.CrosstalkColorAxisMinimumPercent = heatmapPreview.ColorMinimumPercent;
+        if (double.IsFinite(heatmapPreview.ColorMaximumPercent))
+            _configuration.CrosstalkColorAxisMaximumPercent = heatmapPreview.ColorMaximumPercent;
         for (int i = 0; i < _configuration.Projects.Count && i < checkedListProjects.Items.Count; i++)
             _configuration.Projects[i].Enabled = checkedListProjects.GetItemChecked(i);
         int selectedProject = checkedListProjects.SelectedIndex;
@@ -161,18 +191,29 @@ public partial class DashboardForm : Form
     {
         if (_runTask is { IsCompleted: false }) return;
         ReadConfigurationFromControls();
+        SyncActiveNamedPlanSnapshot();
         try { _settingsStore.Save(_configuration); } catch (Exception ex) { AppendLog($"保存配置失败：{ex.Message}"); }
         if (!_server.IsListening || !_server.IsConnected)
         {
             MessageBox.Show(this, "请先启动监听，并等待 MRTEST/设备客户端连接。", "无法开始", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
-        _runner ??= new TestPlanRunner(_server, _projector, _monitor, log: message => { AppendLog(message); return Task.CompletedTask; });
+        try
+        {
+            _dataProcessor.DefaultCrosstalkOptions = BuildCrosstalkAnalysisOptions();
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException or InvalidDataException)
+        {
+            ShowCrosstalkError(ex);
+            return;
+        }
+        _runner ??= new TestPlanRunner(_server, _projector, _monitor, _dataProcessor,
+            log: message => { AppendLog(message); return Task.CompletedTask; });
         _runner.DataResultProduced -= Runner_DataResultProduced;
         _runner.DataResultProduced += Runner_DataResultProduced;
         _runner.ProgressChanged -= Runner_ProgressChanged;
         _runner.ProgressChanged += Runner_ProgressChanged;
-        gridResults.Rows.Clear();
+        ResetResultDisplayHistory();
         ResetCrosstalkResultHistory();
         SetRunningUi(true);
         _runTask = RunPlanSafeAsync(_configuration);
@@ -254,6 +295,7 @@ public partial class DashboardForm : Form
         {
             ReadConfigurationFromControls();
             _configuration.ManualCommand = normalized;
+            SyncActiveNamedPlanSnapshot();
             try { _settingsStore.Save(_configuration); } catch (Exception ex) { AppendLog($"保存手动报文失败：{ex.Message}"); }
             await _monitor.StopAsync();
             _monitor.Start(_configuration.MrTestExecutablePath);
@@ -297,8 +339,35 @@ public partial class DashboardForm : Form
         {
             _configuration = form.Configuration;
             ApplyConfigurationToControls();
+            SyncActiveNamedPlanSnapshot();
             _settingsStore.Save(_configuration);
             AppendLog("测试项目/固定图卡顺序已更新并保存。");
+        }
+    }
+
+    /// <summary>
+    /// 打开测试数据展示规则编辑器。编辑器使用配置副本，只有点击保存（或
+    /// 关闭窗口触发保存）后才把规则写回主界面和用户配置；测量运行期间
+    /// 禁止打开，避免修改中的规则与正在执行的项目产生歧义。
+    /// </summary>
+    private void ButtonDataDisplayRules_Click(object? sender, EventArgs e)
+    {
+        if (_planRunning || _closing)
+        {
+            AppendLog("一键测试进行中，暂不能编辑数据展示规则。");
+            return;
+        }
+
+        ReadConfigurationFromControls();
+        using var form = new TestDataDisplayRuleForm(_configuration, _settingsStore);
+        if (form.ShowDialog(this) == DialogResult.OK)
+        {
+            _configuration = form.Configuration;
+            ApplyConfigurationToControls();
+            SyncActiveNamedPlanSnapshot();
+            try { _settingsStore.Save(_configuration); }
+            catch (Exception ex) { AppendLog($"保存数据展示规则失败：{ex.Message}"); }
+            AppendLog($"数据展示规则已更新：{_configuration.DisplayRules.Count} 条。");
         }
     }
 
@@ -306,9 +375,9 @@ public partial class DashboardForm : Form
     {
         OnUi(() =>
         {
-            foreach (DataProcessing.TestMetric metric in result.Metrics)
-                gridResults.Rows.Add(result.ProjectName, metric.DisplayName, metric.Value, metric.Source, metric.Status, result.OutputDirectory ?? string.Empty);
-            if (result.Kind == TestProjectKind.Crosstalk && !string.IsNullOrWhiteSpace(result.HeatmapPath))
+            AddDisplayResult(result);
+            if (result.Kind == TestProjectKind.Crosstalk &&
+                (!string.IsNullOrWhiteSpace(result.HeatmapPath) || result.CrosstalkCalculation is not null))
             {
                 var entry = new CrosstalkResultEntry(
                     result,
@@ -320,6 +389,10 @@ public partial class DashboardForm : Form
                 comboCrosstalkResults.SelectedIndex = comboCrosstalkResults.Items.Count - 1;
                 _lastCrosstalkResult = result;
                 UpdateCrosstalkViewState();
+                if (result.CrosstalkCalculation is not null)
+                    ApplyCrosstalkAnalysisToDashboard(result.CrosstalkCalculation, result.CrosstalkOptions);
+                else if (!string.IsNullOrWhiteSpace(result.HeatmapPath))
+                    _ = TryLoadCrosstalkPreviewImage(result.HeatmapPath);
             }
         });
     }
@@ -327,7 +400,13 @@ public partial class DashboardForm : Form
     private void ComboCrosstalkResults_SelectedIndexChanged(object? sender, EventArgs e)
     {
         if (comboCrosstalkResults.SelectedItem is CrosstalkResultEntry entry)
+        {
             _lastCrosstalkResult = entry.Result;
+            if (entry.Result.CrosstalkCalculation is not null)
+                ApplyCrosstalkAnalysisToDashboard(entry.Result.CrosstalkCalculation, entry.Result.CrosstalkOptions);
+            else if (!string.IsNullOrWhiteSpace(entry.Result.HeatmapPath))
+                TryLoadCrosstalkPreviewImage(entry.Result.HeatmapPath);
+        }
         else if (_crosstalkResultHistory.Count == 0)
             _lastCrosstalkResult = null;
         UpdateCrosstalkViewState();
@@ -335,13 +414,232 @@ public partial class DashboardForm : Form
 
     private void ButtonViewCrosstalk_Click(object? sender, EventArgs e)
     {
-        if (_lastCrosstalkResult is null) return;
-        using var form = new CrosstalkResultForm(_lastCrosstalkResult);
+        if (_lastCrosstalkResult is null)
+        {
+            ButtonCrosstalkAnalyze_Click(sender, e);
+            return;
+        }
+
+        // Reuse the analyzer's last editable source/output paths and options
+        // when opening a result from the plan.  The result itself remains the
+        // immutable input batch; the analyzer can still export a new masked
+        // version without overwriting that batch.
+        CrosstalkAnalysisOptions options;
+        try
+        {
+            options = BuildCrosstalkAnalysisOptions();
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException or InvalidDataException)
+        {
+            ShowCrosstalkError(ex);
+            return;
+        }
+        string sourceRoot = string.IsNullOrWhiteSpace(_configuration.CrosstalkAnalysisSourceDirectory)
+            ? _lastCrosstalkResult.OutputDirectory ?? _configuration.ExportDirectory
+            : _configuration.CrosstalkAnalysisSourceDirectory;
+        string outputRoot = string.IsNullOrWhiteSpace(_configuration.CrosstalkAnalysisOutputDirectory)
+            ? _configuration.OutputDirectory
+            : _configuration.CrosstalkAnalysisOutputDirectory;
+        using var form = new CrosstalkResultForm(
+            _lastCrosstalkResult,
+            _lastCrosstalkResult.CrosstalkCalculation,
+            sourceRoot,
+            outputRoot,
+            options);
         form.ShowDialog(this);
+        PersistCrosstalkFormState(form);
+        if (form.CurrentCalculation is not null)
+            ApplyCrosstalkAnalysisToDashboard(form.CurrentCalculation, form.CurrentOptions);
+    }
+
+    /// <summary>主界面“串扰分析/参数”按钮：直接选择 ExportFile 根目录并打开完整分析器。</summary>
+    private void ButtonCrosstalkAnalyze_Click(object? sender, EventArgs e)
+    {
+        if (_planRunning)
+        {
+            AppendLog("一键测试进行中，暂不能打开串扰分析器。");
+            return;
+        }
+
+        ReadConfigurationFromControls();
+        CrosstalkAnalysisOptions options;
+        try
+        {
+            options = BuildCrosstalkAnalysisOptions();
+        }
+        catch (Exception ex)
+        {
+            ShowCrosstalkError(ex);
+            return;
+        }
+
+        string sourceRoot = string.IsNullOrWhiteSpace(_configuration.CrosstalkAnalysisSourceDirectory)
+            ? _configuration.ExportDirectory
+            : _configuration.CrosstalkAnalysisSourceDirectory;
+        string outputRoot = string.IsNullOrWhiteSpace(_configuration.CrosstalkAnalysisOutputDirectory)
+            ? _configuration.OutputDirectory
+            : _configuration.CrosstalkAnalysisOutputDirectory;
+        using var form = new CrosstalkResultForm(
+            sourceRoot,
+            outputRoot,
+            options);
+        form.AnalysisChanged += CrosstalkForm_AnalysisChanged;
+        form.ShowDialog(this);
+        form.AnalysisChanged -= CrosstalkForm_AnalysisChanged;
+        PersistCrosstalkFormState(form);
+        if (form.CurrentCalculation is not null)
+            ApplyCrosstalkAnalysisToDashboard(form.CurrentCalculation, form.CurrentOptions);
+    }
+
+    /// <summary>
+    /// 将完整分析器的可编辑状态（路径、阈值、色轴、坐标掩膜和备注）
+    /// 写回主配置。这样关闭分析器后再次打开仍使用上次修改后的值。
+    /// </summary>
+    private void PersistCrosstalkFormState(CrosstalkResultForm form)
+    {
+        if (form is null) return;
+        _configuration.CrosstalkAnalysisSourceDirectory = form.CurrentSourceRoot;
+        _configuration.CrosstalkAnalysisOutputDirectory = form.CurrentOutputRoot;
+        _configuration.CrosstalkMaskCoordinates = form.CurrentMaskCoordinates;
+        _configuration.CrosstalkMaskNote = form.CurrentMaskNote;
+        ApplyCrosstalkOptionsToConfiguration(form.CurrentOptions);
+        // 即使分析器尚未计算任何矩阵，也要让主界面的可编辑阈值
+        // 立即反映刚刚保存的值。
+        heatmapPreview.AnomalyThresholdPercent = form.CurrentOptions.AbnormalThresholdPercent;
+        heatmapPreview.ColorMinimumPercent = form.CurrentOptions.ColorAxisMinimumPercent;
+        heatmapPreview.ColorMaximumPercent = form.CurrentOptions.ColorAxisMaximumPercent;
+        SetCrosstalkThresholdControlValue(form.CurrentOptions.AbnormalThresholdPercent);
+        SyncActiveNamedPlanSnapshot();
+        try { _settingsStore.Save(_configuration); }
+        catch (Exception ex) { AppendLog($"保存串扰分析参数失败：{ex.Message}"); }
+    }
+
+    private void ButtonCrosstalkOpenResult_Click(object? sender, EventArgs e)
+    {
+        if (_lastCrosstalkResult is not null)
+        {
+            ButtonViewCrosstalk_Click(sender, e);
+            return;
+        }
+        ButtonCrosstalkAnalyze_Click(sender, e);
+    }
+
+    private void CrosstalkForm_AnalysisChanged(object? sender, EventArgs e)
+    {
+        if (sender is CrosstalkResultForm form && form.CurrentCalculation is not null)
+            OnUi(() => ApplyCrosstalkAnalysisToDashboard(form.CurrentCalculation, form.CurrentOptions));
+    }
+
+    private void HeatmapPreview_MaskSelected(object? sender, HeatmapMaskSelectedEventArgs e)
+    {
+        if (_crosstalkCalculation is null) return;
+        bool[,] mask = _crosstalkCalculation.UserMask.Length == 0
+            ? new bool[CrosstalkDataProcessor.HeatmapRows, CrosstalkDataProcessor.HeatmapColumns]
+            : (bool[,])_crosstalkCalculation.UserMask.Clone();
+        try
+        {
+            CrosstalkMaskStore.AddRectangle(mask, e.ColumnStart, e.RowStart, e.ColumnEnd, e.RowEnd);
+            CrosstalkAnalysisOptions options = (_crosstalkAnalysisOptions ?? BuildCrosstalkAnalysisOptions()) with
+            {
+                UserMask = mask
+            };
+            CrosstalkCalculationResult updated = CrosstalkDataProcessor.Recalculate(
+                _crosstalkCalculation, options);
+            ApplyCrosstalkAnalysisToDashboard(updated, options);
+            _configuration.CrosstalkMaskCoordinates = BuildCoordinateSummary(mask);
+            AppendLog($"主界面热图已添加掩膜区域：{e}。");
+        }
+        catch (Exception ex)
+        {
+            ShowCrosstalkError(ex);
+        }
     }
 
     private void Runner_ProgressChanged(object? sender, TestRunProgress progress) =>
         OnUi(() => labelProgress.Text = progress.Message);
+
+    private CrosstalkAnalysisOptions BuildCrosstalkAnalysisOptions(bool[,]? userMask = null)
+    {
+        // 配置保存的是原始比例；界面/配置文件默认 0.03 即 3%。
+        if (userMask is null && !string.IsNullOrWhiteSpace(_configuration.CrosstalkMaskCoordinates))
+            userMask = CrosstalkMaskStore.ParseCoordinateRanges(
+                _configuration.CrosstalkMaskCoordinates,
+                CrosstalkDataProcessor.HeatmapRows,
+                CrosstalkDataProcessor.HeatmapColumns);
+        CrosstalkAnalysisOptions options = _configuration.CreateCrosstalkAnalysisOptions(
+            userMask,
+            _configuration.CrosstalkMaskName);
+        return options.Normalize();
+    }
+
+    private void ApplyCrosstalkOptionsToConfiguration(CrosstalkAnalysisOptions options)
+    {
+        CrosstalkAnalysisOptions normalized = options.Normalize();
+        _configuration.CrosstalkAbnormalThresholdRatio = normalized.AbnormalThresholdRatio;
+        _configuration.CrosstalkColorAxisMinimumPercent = normalized.ColorAxisMinimumPercent;
+        _configuration.CrosstalkColorAxisMaximumPercent = normalized.ColorAxisMaximumPercent;
+        _configuration.CrosstalkMaskName = normalized.MaskName;
+        _configuration.CrosstalkMaskNote = normalized.MaskNote;
+        if (normalized.UserMask is not null)
+            _configuration.CrosstalkMaskCoordinates = BuildCoordinateSummary(normalized.UserMask);
+        _configuration.Normalize();
+    }
+
+    private void ApplyCrosstalkAnalysisToDashboard(
+        CrosstalkCalculationResult calculation,
+        CrosstalkAnalysisOptions? options)
+    {
+        if (IsDisposed || Disposing) return;
+        _crosstalkCalculation = calculation;
+        _crosstalkAnalysisOptions = options ?? calculation.AnalysisOptions;
+        CrosstalkAnalysisOptions effective = _crosstalkAnalysisOptions.Normalize();
+        heatmapPreview.ColorMinimumPercent = effective.ColorAxisMinimumPercent;
+        heatmapPreview.ColorMaximumPercent = effective.ColorAxisMaximumPercent;
+        heatmapPreview.AnomalyThresholdPercent = effective.AbnormalThresholdPercent;
+        SetCrosstalkThresholdControlValue(effective.AbnormalThresholdPercent);
+        heatmapPreview.SetValues(calculation.ValuesForHeatmap);
+        var cells = new List<(int Row, int Column)>();
+        bool[,] userMask = calculation.UserMask;
+        if (userMask.Length > 0)
+        {
+            for (int row = 0; row < userMask.GetLength(0); row++)
+                for (int column = 0; column < userMask.GetLength(1); column++)
+                    if (userMask[row, column]) cells.Add((row, column));
+        }
+        heatmapPreview.SetMaskedCells(cells);
+        labelCrosstalkPreviewHint.Text =
+            $"Max {FormatPercent(calculation.Maximum)}  Min {FormatPercent(calculation.Minimum)}  " +
+            $"Mean {FormatPercent(calculation.Mean)}  异常 {calculation.AbnormalPointCount}";
+        buttonCrosstalkOpenResult.Enabled = true;
+        AppendLog($"串扰热图已更新：Max {FormatPercent(calculation.Maximum)}，" +
+            $"Min {FormatPercent(calculation.Minimum)}，Mean {FormatPercent(calculation.Mean)}，" +
+            $"异常点 {calculation.AbnormalPointCount}。");
+    }
+
+    private static string FormatPercent(double ratio) =>
+        double.IsFinite(ratio)
+            ? $"{ratio * 100d:0.###}%"
+            : "—";
+
+    private static string BuildCoordinateSummary(bool[,] mask)
+    {
+        // 将点集压缩为若干行矩形，便于下一次启动恢复；无法合并的点仍会以 1×1 矩形保存。
+        var rectangles = new List<string>();
+        int rows = mask.GetLength(0), columns = mask.GetLength(1);
+        for (int row = 0; row < rows; row++)
+        {
+            int column = 0;
+            while (column < columns)
+            {
+                if (!mask[row, column]) { column++; continue; }
+                int start = column;
+                while (column + 1 < columns && mask[row, column + 1]) column++;
+                rectangles.Add($"{start + 1},{row + 1}-{column + 1},{row + 1}");
+                column++;
+            }
+        }
+        return string.Join(';', rectangles);
+    }
 
     private void ButtonApplyProjectRepeat_Click(object? sender, EventArgs e)
     {
@@ -350,6 +648,7 @@ public partial class DashboardForm : Form
         _configuration.Projects[index].RepeatCount = (int)numericProjectRepeat.Value;
         ApplyConfigurationToControls();
         ReadConfigurationFromControls();
+        SyncActiveNamedPlanSnapshot();
         _settingsStore.Save(_configuration);
         AppendLog($"已将项目“{_configuration.Projects[index].Name}”设置为 {(int)numericProjectRepeat.Value} 次。");
     }
@@ -435,7 +734,7 @@ public partial class DashboardForm : Form
         _closing = true;
         try
         {
-            ReadConfigurationFromControls(); _settingsStore.Save(_configuration);
+            PrepareNamedPlansForSave(); _settingsStore.Save(_configuration);
             _runner?.Cancel();
             try { _runTask?.GetAwaiter().GetResult(); } catch { }
             _monitor.StopAsync().GetAwaiter().GetResult();
@@ -451,7 +750,13 @@ public partial class DashboardForm : Form
     {
         _planRunning = running;
         buttonStart.Enabled = !running && !_manualSendInProgress;
-        buttonStop.Enabled = running; buttonRecipeManager.Enabled = !running; buttonListen.Enabled = !running;
+        buttonStop.Enabled = running;
+        buttonRecipeManager.Enabled = !running;
+        buttonDataDisplayRules.Enabled = !running;
+        buttonListen.Enabled = !running;
+        buttonCrosstalkAnalyze.Enabled = !running && !_closing;
+        buttonApplyCrosstalkThreshold.Enabled = !running && !_closing;
+        UpdateNamedPlanUiState();
         UpdateManualButtonState();
         UpdateCrosstalkViewState();
         labelProgress.Text = running ? "正在执行..." : "等待开始";
@@ -462,6 +767,11 @@ public partial class DashboardForm : Form
         _crosstalkResultHistory.Clear();
         comboCrosstalkResults.Items.Clear();
         _lastCrosstalkResult = null;
+        _crosstalkCalculation = null;
+        _crosstalkAnalysisOptions = null;
+        heatmapPreview.SetValues(null);
+        heatmapPreview.ClearMask();
+        labelCrosstalkPreviewHint.Text = "支持掩膜、阈值和历史结果";
         UpdateCrosstalkViewState();
     }
 
@@ -471,7 +781,32 @@ public partial class DashboardForm : Form
         bool hasResults = _crosstalkResultHistory.Count > 0;
         comboCrosstalkResults.Enabled = !_planRunning && hasResults;
         buttonViewCrosstalk.Enabled = !_planRunning &&
-            _lastCrosstalkResult?.HeatmapPath is string path && File.Exists(path);
+            (_lastCrosstalkResult?.CrosstalkCalculation is not null ||
+             _lastCrosstalkResult?.HeatmapPath is string path && File.Exists(path));
+        buttonCrosstalkOpenResult.Enabled = !_planRunning &&
+            (_crosstalkCalculation is not null ||
+             _lastCrosstalkResult?.HeatmapPath is string heatmap && File.Exists(heatmap));
+    }
+
+    private bool TryLoadCrosstalkPreviewImage(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return false;
+        if (!heatmapPreview.TryLoadImage(path, out string? error))
+        {
+            AppendLog($"主界面串扰热图预览读取失败：{error}");
+            return false;
+        }
+        labelCrosstalkPreviewHint.Text = "已加载串扰热图；点击“打开热图”可查看详细结果";
+        buttonCrosstalkOpenResult.Enabled = true;
+        return true;
+    }
+
+    private void ShowCrosstalkError(Exception exception)
+    {
+        AppendLog($"串扰分析失败：{exception.Message}");
+        if (!_closing)
+            MessageBox.Show(this, exception.Message, "串扰分析", MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
     }
 
     private static string BuildCrosstalkResultDisplay(

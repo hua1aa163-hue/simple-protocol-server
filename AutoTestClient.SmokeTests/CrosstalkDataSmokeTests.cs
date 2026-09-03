@@ -61,6 +61,21 @@ internal static class CrosstalkDataSmokeTests
             check(Directory.Exists(Path.Combine(first.OutputDirectory, "原始数据")) &&
                   Directory.Exists(Path.Combine(second.OutputDirectory, "原始数据")),
                 "串扰两批原始数据归档互不干涉");
+
+            // Direct folder analysis also writes the untouched merged matrix.
+            // Repeating the same operation must retain both raw workbooks;
+            // the second one receives a deterministic suffix instead of
+            // overwriting the first file.
+            string directRoot = Path.Combine(root, "DirectExportFile");
+            Directory.CreateDirectory(directRoot);
+            CreateBatch(directRoot, "direct", 10.01, 11.0, 10.0);
+            _ = CrosstalkDataProcessor.ExportCurrentFolderResult(directRoot, outputRoot);
+            _ = CrosstalkDataProcessor.ExportCurrentFolderResult(directRoot, outputRoot);
+            string rawFirst = Path.Combine(outputRoot, "orig3_outputDirectExportFile.xlsx");
+            string rawSecond = Path.Combine(outputRoot, "orig3_outputDirectExportFile_1.xlsx");
+            check(File.Exists(rawFirst) && File.Exists(rawSecond) &&
+                  new FileInfo(rawFirst).Length > 0 && new FileInfo(rawSecond).Length > 0,
+                "重复直接串扰导出原始工作簿不覆盖");
         }
         finally
         {

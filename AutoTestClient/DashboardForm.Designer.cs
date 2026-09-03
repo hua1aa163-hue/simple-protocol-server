@@ -18,6 +18,9 @@ namespace AutoTestClient
         private TableLayoutPanel pathsTable;
         private TableLayoutPanel planTable;
         private TableLayoutPanel planOptions;
+        private FlowLayoutPanel planPresetToolbar;
+        private TableLayoutPanel crosstalkPreviewLayout;
+        private FlowLayoutPanel crosstalkToolbar;
         private TableLayoutPanel manualTable;
         private SplitContainer resultSplit;
 
@@ -49,6 +52,7 @@ namespace AutoTestClient
         private Button buttonStart;
         private Button buttonStop;
         private Button buttonRecipeManager;
+        private Button buttonDataDisplayRules;
         private Button buttonSendManual;
         private Button buttonClearLog;
         private Button buttonViewCrosstalk;
@@ -66,6 +70,18 @@ namespace AutoTestClient
         private ComboBox comboProjectionMode;
         private CheckBox checkAutoConfirm;
         private Button buttonApplyProjectRepeat;
+        private Label labelPlanPreset;
+        private ComboBox comboTestPlans;
+        private Button buttonSavePlan;
+        private Button buttonSavePlanAs;
+        private Button buttonDeletePlan;
+        private HeatmapPreviewControl heatmapPreview;
+        private Button buttonCrosstalkAnalyze;
+        private Button buttonCrosstalkOpenResult;
+        private Label labelCrosstalkThreshold;
+        private NumericUpDown numericCrosstalkThreshold;
+        private Button buttonApplyCrosstalkThreshold;
+        private Label labelCrosstalkPreviewHint;
         private RichTextBox textBoxLog;
         private DataGridView gridResults;
         private DataGridViewTextBoxColumn resultProjectColumn;
@@ -119,16 +135,32 @@ namespace AutoTestClient
             groupManual = new GroupBox();
             manualTable = new TableLayoutPanel();
             labelManualCommand = new Label();
-            buttonViewCrosstalk = new Button();
             comboCrosstalkResults = new ComboBox();
+            buttonViewCrosstalk = new Button();
             buttonSendManual = new Button();
             buttonClearLog = new Button();
             textBoxManualCommand = new TextBox();
             groupPlan = new GroupBox();
+            buttonDataDisplayRules = new Button();
             planTable = new TableLayoutPanel();
             checkedListProjects = new CheckboxOnlyCheckedListBox();
+            crosstalkPreviewLayout = new TableLayoutPanel();
             labelProgress = new Label();
+            heatmapPreview = new HeatmapPreviewControl();
+            crosstalkToolbar = new FlowLayoutPanel();
+            buttonCrosstalkAnalyze = new Button();
+            buttonCrosstalkOpenResult = new Button();
+            labelCrosstalkThreshold = new Label();
+            numericCrosstalkThreshold = new NumericUpDown();
+            buttonApplyCrosstalkThreshold = new Button();
+            labelCrosstalkPreviewHint = new Label();
             planOptions = new TableLayoutPanel();
+            planPresetToolbar = new FlowLayoutPanel();
+            labelPlanPreset = new Label();
+            comboTestPlans = new ComboBox();
+            buttonSavePlan = new Button();
+            buttonSavePlanAs = new Button();
+            buttonDeletePlan = new Button();
             labelWholeRepeat = new Label();
             numericWholeRepeat = new NumericUpDown();
             labelProjectRepeat = new Label();
@@ -154,7 +186,11 @@ namespace AutoTestClient
             manualTable.SuspendLayout();
             groupPlan.SuspendLayout();
             planTable.SuspendLayout();
+            crosstalkPreviewLayout.SuspendLayout();
+            crosstalkToolbar.SuspendLayout();
+            ((ISupportInitialize)numericCrosstalkThreshold).BeginInit();
             planOptions.SuspendLayout();
+            planPresetToolbar.SuspendLayout();
             ((ISupportInitialize)numericWholeRepeat).BeginInit();
             ((ISupportInitialize)numericProjectRepeat).BeginInit();
             ((ISupportInitialize)numericPopupDelay).BeginInit();
@@ -241,7 +277,7 @@ namespace AutoTestClient
             // 
             labelPort.Anchor = AnchorStyles.Left;
             labelPort.AutoSize = true;
-            labelPort.Location = new Point(256, 12);
+            labelPort.Location = new Point(286, 12);
             labelPort.Name = "labelPort";
             labelPort.Size = new Size(32, 17);
             labelPort.TabIndex = 2;
@@ -249,7 +285,7 @@ namespace AutoTestClient
             // 
             // buttonListen
             // 
-            buttonListen.Location = new Point(404, 7);
+            buttonListen.Location = new Point(434, 7);
             buttonListen.Name = "buttonListen";
             buttonListen.Size = new Size(82, 28);
             buttonListen.TabIndex = 4;
@@ -261,7 +297,7 @@ namespace AutoTestClient
             // 
             buttonStart.BackColor = Color.FromArgb(37, 99, 235);
             buttonStart.ForeColor = Color.White;
-            buttonStart.Location = new Point(492, 7);
+            buttonStart.Location = new Point(522, 7);
             buttonStart.Name = "buttonStart";
             buttonStart.Size = new Size(106, 28);
             buttonStart.TabIndex = 5;
@@ -274,7 +310,7 @@ namespace AutoTestClient
             buttonStop.BackColor = Color.FromArgb(220, 38, 38);
             buttonStop.Enabled = false;
             buttonStop.ForeColor = Color.White;
-            buttonStop.Location = new Point(604, 7);
+            buttonStop.Location = new Point(634, 7);
             buttonStop.Name = "buttonStop";
             buttonStop.Size = new Size(84, 28);
             buttonStop.TabIndex = 6;
@@ -286,7 +322,7 @@ namespace AutoTestClient
             // 
             labelConnectionState.Anchor = AnchorStyles.Left;
             labelConnectionState.AutoSize = true;
-            labelConnectionState.Location = new Point(694, 12);
+            labelConnectionState.Location = new Point(724, 12);
             labelConnectionState.Name = "labelConnectionState";
             labelConnectionState.Size = new Size(44, 17);
             labelConnectionState.TabIndex = 7;
@@ -302,7 +338,7 @@ namespace AutoTestClient
             // 
             // textBoxPort
             // 
-            textBoxPort.Location = new Point(304, 7);
+            textBoxPort.Location = new Point(334, 7);
             textBoxPort.Name = "textBoxPort";
             textBoxPort.Size = new Size(94, 23);
             textBoxPort.TabIndex = 3;
@@ -567,7 +603,7 @@ namespace AutoTestClient
             textBoxExport.Name = "textBoxExport";
             textBoxExport.Size = new Size(506, 23);
             textBoxExport.TabIndex = 10;
-            textBoxExport.Text = "D:\\Program Files\\GYTech\\Setup_MRTest\\ExportFile";
+            textBoxExport.Text = "D:\\Program Files\\GYTech\\Setup\\_MRTest\\ExportFile";
             // 
             // buttonBrowseExport
             // 
@@ -656,27 +692,25 @@ namespace AutoTestClient
             labelManualCommand.Size = new Size(56, 17);
             labelManualCommand.TabIndex = 0;
             labelManualCommand.Text = "发送报文";
-            //
+            // 
             // comboCrosstalkResults
-            //
+            // 
             comboCrosstalkResults.Dock = DockStyle.Fill;
             comboCrosstalkResults.DropDownStyle = ComboBoxStyle.DropDownList;
             comboCrosstalkResults.Enabled = false;
             comboCrosstalkResults.FormattingEnabled = true;
-            comboCrosstalkResults.Location = new Point(1014, 10);
+            comboCrosstalkResults.Location = new Point(875, 10);
             comboCrosstalkResults.Name = "comboCrosstalkResults";
-            comboCrosstalkResults.Size = new Size(220, 25);
+            comboCrosstalkResults.Size = new Size(214, 25);
             comboCrosstalkResults.TabIndex = 4;
-            comboCrosstalkResults.Text = "选择串扰结果（暂无）";
             comboCrosstalkResults.SelectedIndexChanged += ComboCrosstalkResults_SelectedIndexChanged;
-            //
+            // 
             // buttonViewCrosstalk
-            //
-            buttonViewCrosstalk.Enabled = false;
+            // 
             buttonViewCrosstalk.Dock = DockStyle.Fill;
+            buttonViewCrosstalk.Enabled = false;
             buttonViewCrosstalk.Font = new Font("Microsoft YaHei UI", 12F, FontStyle.Regular, GraphicsUnit.Point, 134);
-            buttonViewCrosstalk.Location = new Point(1234, 10);
-            buttonViewCrosstalk.Margin = new Padding(3);
+            buttonViewCrosstalk.Location = new Point(1095, 10);
             buttonViewCrosstalk.Name = "buttonViewCrosstalk";
             buttonViewCrosstalk.Size = new Size(138, 33);
             buttonViewCrosstalk.TabIndex = 5;
@@ -686,7 +720,7 @@ namespace AutoTestClient
             // 
             // buttonSendManual
             // 
-            buttonSendManual.Location = new Point(795, 10);
+            buttonSendManual.Location = new Point(575, 10);
             buttonSendManual.Name = "buttonSendManual";
             buttonSendManual.Size = new Size(102, 27);
             buttonSendManual.TabIndex = 2;
@@ -696,7 +730,7 @@ namespace AutoTestClient
             // 
             // buttonClearLog
             // 
-            buttonClearLog.Location = new Point(904, 10);
+            buttonClearLog.Location = new Point(684, 10);
             buttonClearLog.Name = "buttonClearLog";
             buttonClearLog.Size = new Size(84, 27);
             buttonClearLog.TabIndex = 3;
@@ -707,16 +741,17 @@ namespace AutoTestClient
             // textBoxManualCommand
             // 
             textBoxManualCommand.Dock = DockStyle.Fill;
-            textBoxManualCommand.Location = new Point(82, 15);
-            textBoxManualCommand.Name = "textBoxManualCommand";
+            textBoxManualCommand.Location = new Point(80, 11);
             textBoxManualCommand.Margin = new Padding(3, 4, 3, 4);
-            textBoxManualCommand.Size = new Size(704, 23);
+            textBoxManualCommand.Name = "textBoxManualCommand";
+            textBoxManualCommand.Size = new Size(489, 23);
             textBoxManualCommand.TabIndex = 1;
             textBoxManualCommand.Text = "&|Meas|A|M|@";
             textBoxManualCommand.TextChanged += textBoxManualCommand_TextChanged;
             // 
             // groupPlan
             // 
+            groupPlan.Controls.Add(buttonDataDisplayRules);
             groupPlan.Controls.Add(planTable);
             groupPlan.Location = new Point(10, 226);
             groupPlan.Margin = new Padding(0);
@@ -727,6 +762,17 @@ namespace AutoTestClient
             groupPlan.TabStop = false;
             groupPlan.Text = "一键测试计划";
             // 
+            // buttonDataDisplayRules
+            // 
+            buttonDataDisplayRules.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            buttonDataDisplayRules.Location = new Point(1072, 0);
+            buttonDataDisplayRules.Name = "buttonDataDisplayRules";
+            buttonDataDisplayRules.Size = new Size(180, 26);
+            buttonDataDisplayRules.TabIndex = 11;
+            buttonDataDisplayRules.Text = "数据展示规则";
+            buttonDataDisplayRules.UseVisualStyleBackColor = true;
+            buttonDataDisplayRules.Click += ButtonDataDisplayRules_Click;
+            // 
             // planTable
             // 
             planTable.ColumnCount = 3;
@@ -734,7 +780,7 @@ namespace AutoTestClient
             planTable.ColumnStyles.Add(new ColumnStyle());
             planTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
             planTable.Controls.Add(checkedListProjects, 0, 0);
-            planTable.Controls.Add(labelProgress, 2, 0);
+            planTable.Controls.Add(crosstalkPreviewLayout, 2, 0);
             planTable.Controls.Add(planOptions, 1, 0);
             planTable.GrowStyle = TableLayoutPanelGrowStyle.FixedSize;
             planTable.Location = new Point(8, 21);
@@ -749,7 +795,6 @@ namespace AutoTestClient
             // checkedListProjects
             // 
             checkedListProjects.BorderStyle = BorderStyle.FixedSingle;
-            checkedListProjects.CheckOnClick = false;
             checkedListProjects.Dock = DockStyle.Fill;
             checkedListProjects.FormattingEnabled = true;
             checkedListProjects.Items.AddRange(new object[] { "1. FOV测试 [FOV] ×1", "2. 黑白对比度 [黑白对比度] ×1", "3. 亮度均匀性 [亮度均匀性] ×1", "4. 色域 [色域] ×1", "5. 串扰 [串扰] ×1" });
@@ -759,54 +804,252 @@ namespace AutoTestClient
             checkedListProjects.TabIndex = 0;
             checkedListProjects.SelectedIndexChanged += CheckedListProjects_SelectedIndexChanged;
             // 
+            // crosstalkPreviewLayout
+            // 
+            crosstalkPreviewLayout.ColumnCount = 1;
+            crosstalkPreviewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
+            crosstalkPreviewLayout.Controls.Add(labelProgress, 0, 0);
+            crosstalkPreviewLayout.Controls.Add(heatmapPreview, 0, 1);
+            crosstalkPreviewLayout.Controls.Add(crosstalkToolbar, 0, 2);
+            crosstalkPreviewLayout.Dock = DockStyle.Fill;
+            crosstalkPreviewLayout.GrowStyle = TableLayoutPanelGrowStyle.FixedSize;
+            crosstalkPreviewLayout.Location = new Point(715, 4);
+            crosstalkPreviewLayout.Margin = new Padding(0);
+            crosstalkPreviewLayout.Name = "crosstalkPreviewLayout";
+            crosstalkPreviewLayout.RowCount = 3;
+            crosstalkPreviewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 48F));
+            crosstalkPreviewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 38F));
+            crosstalkPreviewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 14F));
+            crosstalkPreviewLayout.Size = new Size(521, 206);
+            crosstalkPreviewLayout.TabIndex = 3;
+            // 
             // labelProgress
             // 
+            labelProgress.Dock = DockStyle.Fill;
             labelProgress.Font = new Font("Microsoft YaHei UI", 15F, FontStyle.Bold, GraphicsUnit.Point, 134);
-            labelProgress.Location = new Point(718, 4);
+            labelProgress.Location = new Point(0, 0);
+            labelProgress.Margin = new Padding(0, 0, 0, 3);
             labelProgress.Name = "labelProgress";
             labelProgress.Padding = new Padding(8);
-            labelProgress.Size = new Size(490, 206);
+            labelProgress.Size = new Size(521, 95);
             labelProgress.TabIndex = 2;
             labelProgress.Text = "等待开始";
             labelProgress.TextAlign = ContentAlignment.MiddleCenter;
+            // 
+            // heatmapPreview
+            // 
+            heatmapPreview.BackColor = Color.White;
+            heatmapPreview.Dock = DockStyle.Fill;
+            heatmapPreview.ForeColor = Color.FromArgb(31, 41, 55);
+            heatmapPreview.Location = new Point(0, 101);
+            heatmapPreview.Margin = new Padding(0, 3, 0, 0);
+            heatmapPreview.MinimumSize = new Size(120, 40);
+            heatmapPreview.Name = "heatmapPreview";
+            heatmapPreview.Size = new Size(521, 75);
+            heatmapPreview.TabIndex = 0;
+            heatmapPreview.TabStop = false;
+            // 
+            // crosstalkToolbar
+            // 
+            crosstalkToolbar.BackColor = Color.Transparent;
+            crosstalkToolbar.Controls.Add(buttonCrosstalkAnalyze);
+            crosstalkToolbar.Controls.Add(buttonCrosstalkOpenResult);
+            crosstalkToolbar.Controls.Add(labelCrosstalkThreshold);
+            crosstalkToolbar.Controls.Add(numericCrosstalkThreshold);
+            crosstalkToolbar.Controls.Add(buttonApplyCrosstalkThreshold);
+            crosstalkToolbar.Controls.Add(labelCrosstalkPreviewHint);
+            crosstalkToolbar.Dock = DockStyle.Fill;
+            crosstalkToolbar.Location = new Point(0, 176);
+            crosstalkToolbar.Margin = new Padding(0);
+            crosstalkToolbar.Name = "crosstalkToolbar";
+            crosstalkToolbar.Padding = new Padding(0, 1, 0, 0);
+            crosstalkToolbar.Size = new Size(521, 30);
+            crosstalkToolbar.TabIndex = 4;
+            crosstalkToolbar.WrapContents = false;
+            // 
+            // buttonCrosstalkAnalyze
+            // 
+            buttonCrosstalkAnalyze.Location = new Point(0, 1);
+            buttonCrosstalkAnalyze.Margin = new Padding(0, 0, 2, 0);
+            buttonCrosstalkAnalyze.Name = "buttonCrosstalkAnalyze";
+            buttonCrosstalkAnalyze.Size = new Size(94, 26);
+            buttonCrosstalkAnalyze.TabIndex = 0;
+            buttonCrosstalkAnalyze.Text = "串扰分析";
+            buttonCrosstalkAnalyze.UseVisualStyleBackColor = true;
+            buttonCrosstalkAnalyze.Click += ButtonCrosstalkAnalyze_Click;
+            // 
+            // buttonCrosstalkOpenResult
+            // 
+            buttonCrosstalkOpenResult.Enabled = false;
+            buttonCrosstalkOpenResult.Location = new Point(96, 1);
+            buttonCrosstalkOpenResult.Margin = new Padding(0, 0, 2, 0);
+            buttonCrosstalkOpenResult.Name = "buttonCrosstalkOpenResult";
+            buttonCrosstalkOpenResult.Size = new Size(72, 26);
+            buttonCrosstalkOpenResult.TabIndex = 1;
+            buttonCrosstalkOpenResult.Text = "打开结果";
+            buttonCrosstalkOpenResult.UseVisualStyleBackColor = true;
+            buttonCrosstalkOpenResult.Click += ButtonCrosstalkOpenResult_Click;
+            // 
+            // labelCrosstalkThreshold
+            // 
+            labelCrosstalkThreshold.Anchor = AnchorStyles.None;
+            labelCrosstalkThreshold.Location = new Point(170, 4);
+            labelCrosstalkThreshold.Margin = new Padding(0, 0, 2, 0);
+            labelCrosstalkThreshold.Name = "labelCrosstalkThreshold";
+            labelCrosstalkThreshold.Size = new Size(59, 21);
+            labelCrosstalkThreshold.TabIndex = 2;
+            labelCrosstalkThreshold.Text = "异常阈值(%)";
+            labelCrosstalkThreshold.TextAlign = ContentAlignment.MiddleLeft;
+            // 
+            // numericCrosstalkThreshold
+            // 
+            numericCrosstalkThreshold.DecimalPlaces = 3;
+            numericCrosstalkThreshold.Increment = new decimal(new int[] { 1, 0, 0, 65536 });
+            numericCrosstalkThreshold.Location = new Point(231, 3);
+            numericCrosstalkThreshold.Margin = new Padding(0, 2, 2, 2);
+            numericCrosstalkThreshold.Maximum = new decimal(new int[] { 10000, 0, 0, 0 });
+            numericCrosstalkThreshold.Name = "numericCrosstalkThreshold";
+            numericCrosstalkThreshold.Size = new Size(62, 23);
+            numericCrosstalkThreshold.TabIndex = 3;
+            numericCrosstalkThreshold.Value = new decimal(new int[] { 3, 0, 0, 0 });
+            // 
+            // buttonApplyCrosstalkThreshold
+            // 
+            buttonApplyCrosstalkThreshold.Location = new Point(295, 1);
+            buttonApplyCrosstalkThreshold.Margin = new Padding(0, 0, 2, 0);
+            buttonApplyCrosstalkThreshold.Name = "buttonApplyCrosstalkThreshold";
+            buttonApplyCrosstalkThreshold.Size = new Size(48, 26);
+            buttonApplyCrosstalkThreshold.TabIndex = 4;
+            buttonApplyCrosstalkThreshold.Text = "应用";
+            buttonApplyCrosstalkThreshold.UseVisualStyleBackColor = true;
+            buttonApplyCrosstalkThreshold.Click += ButtonApplyCrosstalkThreshold_Click;
+            // 
+            // labelCrosstalkPreviewHint
+            // 
+            labelCrosstalkPreviewHint.AutoEllipsis = true;
+            labelCrosstalkPreviewHint.ForeColor = Color.DimGray;
+            labelCrosstalkPreviewHint.Location = new Point(345, 5);
+            labelCrosstalkPreviewHint.Margin = new Padding(0, 4, 0, 0);
+            labelCrosstalkPreviewHint.Name = "labelCrosstalkPreviewHint";
+            labelCrosstalkPreviewHint.Size = new Size(120, 20);
+            labelCrosstalkPreviewHint.TabIndex = 5;
+            labelCrosstalkPreviewHint.Text = "支持掩膜、阈值和历史结果";
+            labelCrosstalkPreviewHint.TextAlign = ContentAlignment.MiddleLeft;
             // 
             // planOptions
             // 
             planOptions.ColumnCount = 2;
             planOptions.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112F));
             planOptions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100F));
-            planOptions.Controls.Add(labelWholeRepeat, 0, 0);
-            planOptions.Controls.Add(numericWholeRepeat, 1, 0);
-            planOptions.Controls.Add(labelProjectRepeat, 0, 1);
-            planOptions.Controls.Add(numericProjectRepeat, 1, 1);
-            planOptions.Controls.Add(buttonApplyProjectRepeat, 0, 2);
-            planOptions.Controls.Add(labelProjectionMode, 0, 3);
-            planOptions.Controls.Add(comboProjectionMode, 1, 3);
-            planOptions.Controls.Add(labelPopupDelay, 0, 4);
-            planOptions.Controls.Add(numericPopupDelay, 1, 4);
-            planOptions.Controls.Add(checkAutoConfirm, 0, 5);
-            planOptions.Controls.Add(buttonRecipeManager, 0, 6);
+            planOptions.Controls.Add(planPresetToolbar, 0, 0);
+            planOptions.Controls.Add(labelWholeRepeat, 0, 1);
+            planOptions.Controls.Add(numericWholeRepeat, 1, 1);
+            planOptions.Controls.Add(labelProjectRepeat, 0, 2);
+            planOptions.Controls.Add(numericProjectRepeat, 1, 2);
+            planOptions.Controls.Add(buttonApplyProjectRepeat, 0, 3);
+            planOptions.Controls.Add(labelProjectionMode, 0, 4);
+            planOptions.Controls.Add(comboProjectionMode, 1, 4);
+            planOptions.Controls.Add(labelPopupDelay, 0, 5);
+            planOptions.Controls.Add(numericPopupDelay, 1, 5);
+            planOptions.Controls.Add(checkAutoConfirm, 0, 6);
+            planOptions.Controls.Add(buttonRecipeManager, 0, 7);
             planOptions.GrowStyle = TableLayoutPanelGrowStyle.FixedSize;
             planOptions.Location = new Point(397, 4);
             planOptions.Margin = new Padding(0);
             planOptions.Name = "planOptions";
             planOptions.Padding = new Padding(8, 0, 8, 0);
-            planOptions.RowCount = 7;
+            planOptions.RowCount = 8;
             planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 14F));
-            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 14F));
-            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 14F));
-            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 14F));
-            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 14F));
-            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 16F));
-            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 14F));
+            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 12F));
+            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 12F));
+            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 13F));
+            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 12F));
+            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 12F));
+            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 12F));
+            planOptions.RowStyles.Add(new RowStyle(SizeType.Percent, 13F));
             planOptions.Size = new Size(318, 206);
             planOptions.TabIndex = 1;
+            // 
+            // planPresetToolbar
+            // 
+            planPresetToolbar.BackColor = Color.Transparent;
+            planOptions.SetColumnSpan(planPresetToolbar, 2);
+            planPresetToolbar.Controls.Add(labelPlanPreset);
+            planPresetToolbar.Controls.Add(comboTestPlans);
+            planPresetToolbar.Controls.Add(buttonSavePlan);
+            planPresetToolbar.Controls.Add(buttonSavePlanAs);
+            planPresetToolbar.Controls.Add(buttonDeletePlan);
+            planPresetToolbar.Dock = DockStyle.Fill;
+            planPresetToolbar.Location = new Point(8, 0);
+            planPresetToolbar.Margin = new Padding(0);
+            planPresetToolbar.Name = "planPresetToolbar";
+            planPresetToolbar.Padding = new Padding(0, 1, 0, 0);
+            planPresetToolbar.Size = new Size(302, 28);
+            planPresetToolbar.TabIndex = 11;
+            planPresetToolbar.WrapContents = false;
+            // 
+            // labelPlanPreset
+            // 
+            labelPlanPreset.Anchor = AnchorStyles.None;
+            labelPlanPreset.AutoSize = true;
+            labelPlanPreset.Location = new Point(0, 6);
+            labelPlanPreset.Margin = new Padding(0, 0, 4, 0);
+            labelPlanPreset.Name = "labelPlanPreset";
+            labelPlanPreset.Size = new Size(32, 17);
+            labelPlanPreset.TabIndex = 0;
+            labelPlanPreset.Text = "计划";
+            labelPlanPreset.TextAlign = ContentAlignment.MiddleLeft;
+            // 
+            // comboTestPlans
+            // 
+            comboTestPlans.DropDownStyle = ComboBoxStyle.DropDownList;
+            comboTestPlans.FormattingEnabled = true;
+            comboTestPlans.Items.AddRange(new object[] { "默认计划" });
+            comboTestPlans.Location = new Point(36, 3);
+            comboTestPlans.Margin = new Padding(0, 2, 3, 0);
+            comboTestPlans.Name = "comboTestPlans";
+            comboTestPlans.Size = new Size(108, 25);
+            comboTestPlans.TabIndex = 1;
+            comboTestPlans.SelectedIndexChanged += ComboTestPlans_SelectedIndexChanged;
+            // 
+            // buttonSavePlan
+            // 
+            buttonSavePlan.Location = new Point(147, 1);
+            buttonSavePlan.Margin = new Padding(0, 0, 2, 0);
+            buttonSavePlan.Name = "buttonSavePlan";
+            buttonSavePlan.Size = new Size(48, 26);
+            buttonSavePlan.TabIndex = 2;
+            buttonSavePlan.Text = "保存";
+            buttonSavePlan.UseVisualStyleBackColor = true;
+            buttonSavePlan.Click += ButtonSavePlan_Click;
+            // 
+            // buttonSavePlanAs
+            // 
+            buttonSavePlanAs.Location = new Point(197, 1);
+            buttonSavePlanAs.Margin = new Padding(0, 0, 2, 0);
+            buttonSavePlanAs.Name = "buttonSavePlanAs";
+            buttonSavePlanAs.Size = new Size(48, 26);
+            buttonSavePlanAs.TabIndex = 3;
+            buttonSavePlanAs.Text = "另存";
+            buttonSavePlanAs.UseVisualStyleBackColor = true;
+            buttonSavePlanAs.Click += ButtonSavePlanAs_Click;
+            // 
+            // buttonDeletePlan
+            // 
+            buttonDeletePlan.Location = new Point(247, 1);
+            buttonDeletePlan.Margin = new Padding(0);
+            buttonDeletePlan.Name = "buttonDeletePlan";
+            buttonDeletePlan.Size = new Size(48, 26);
+            buttonDeletePlan.TabIndex = 4;
+            buttonDeletePlan.Text = "删除";
+            buttonDeletePlan.UseVisualStyleBackColor = true;
+            buttonDeletePlan.Click += ButtonDeletePlan_Click;
             // 
             // labelWholeRepeat
             // 
             labelWholeRepeat.Anchor = AnchorStyles.Left;
             labelWholeRepeat.AutoSize = true;
-            labelWholeRepeat.Location = new Point(11, 5);
+            labelWholeRepeat.Location = new Point(11, 31);
             labelWholeRepeat.Name = "labelWholeRepeat";
             labelWholeRepeat.Size = new Size(80, 17);
             labelWholeRepeat.TabIndex = 0;
@@ -815,7 +1058,7 @@ namespace AutoTestClient
             // numericWholeRepeat
             // 
             numericWholeRepeat.Dock = DockStyle.Fill;
-            numericWholeRepeat.Location = new Point(125, 1);
+            numericWholeRepeat.Location = new Point(125, 29);
             numericWholeRepeat.Margin = new Padding(5, 1, 5, 1);
             numericWholeRepeat.Maximum = new decimal(new int[] { 9999, 0, 0, 0 });
             numericWholeRepeat.Minimum = new decimal(new int[] { 1, 0, 0, 0 });
@@ -828,7 +1071,7 @@ namespace AutoTestClient
             // 
             labelProjectRepeat.Anchor = AnchorStyles.Left;
             labelProjectRepeat.AutoSize = true;
-            labelProjectRepeat.Location = new Point(11, 33);
+            labelProjectRepeat.Location = new Point(11, 55);
             labelProjectRepeat.Name = "labelProjectRepeat";
             labelProjectRepeat.Size = new Size(80, 17);
             labelProjectRepeat.TabIndex = 2;
@@ -837,7 +1080,7 @@ namespace AutoTestClient
             // numericProjectRepeat
             // 
             numericProjectRepeat.Dock = DockStyle.Fill;
-            numericProjectRepeat.Location = new Point(125, 29);
+            numericProjectRepeat.Location = new Point(125, 53);
             numericProjectRepeat.Margin = new Padding(5, 1, 5, 1);
             numericProjectRepeat.Maximum = new decimal(new int[] { 9999, 0, 0, 0 });
             numericProjectRepeat.Minimum = new decimal(new int[] { 1, 0, 0, 0 });
@@ -850,10 +1093,10 @@ namespace AutoTestClient
             // 
             planOptions.SetColumnSpan(buttonApplyProjectRepeat, 2);
             buttonApplyProjectRepeat.Dock = DockStyle.Fill;
-            buttonApplyProjectRepeat.Location = new Point(13, 57);
+            buttonApplyProjectRepeat.Location = new Point(13, 77);
             buttonApplyProjectRepeat.Margin = new Padding(5, 1, 5, 1);
             buttonApplyProjectRepeat.Name = "buttonApplyProjectRepeat";
-            buttonApplyProjectRepeat.Size = new Size(292, 26);
+            buttonApplyProjectRepeat.Size = new Size(292, 24);
             buttonApplyProjectRepeat.TabIndex = 4;
             buttonApplyProjectRepeat.Text = "应用项目次数";
             buttonApplyProjectRepeat.UseVisualStyleBackColor = true;
@@ -863,7 +1106,7 @@ namespace AutoTestClient
             // 
             labelProjectionMode.Anchor = AnchorStyles.Left;
             labelProjectionMode.AutoSize = true;
-            labelProjectionMode.Location = new Point(11, 89);
+            labelProjectionMode.Location = new Point(11, 105);
             labelProjectionMode.Name = "labelProjectionMode";
             labelProjectionMode.Size = new Size(56, 17);
             labelProjectionMode.TabIndex = 5;
@@ -875,7 +1118,7 @@ namespace AutoTestClient
             comboProjectionMode.DropDownStyle = ComboBoxStyle.DropDownList;
             comboProjectionMode.FormattingEnabled = true;
             comboProjectionMode.Items.AddRange(new object[] { "第二屏 1:1 像素", "窗口适配" });
-            comboProjectionMode.Location = new Point(125, 85);
+            comboProjectionMode.Location = new Point(125, 103);
             comboProjectionMode.Margin = new Padding(5, 1, 5, 1);
             comboProjectionMode.Name = "comboProjectionMode";
             comboProjectionMode.Size = new Size(180, 25);
@@ -885,7 +1128,7 @@ namespace AutoTestClient
             // 
             labelPopupDelay.Anchor = AnchorStyles.Left;
             labelPopupDelay.AutoSize = true;
-            labelPopupDelay.Location = new Point(11, 117);
+            labelPopupDelay.Location = new Point(11, 129);
             labelPopupDelay.Name = "labelPopupDelay";
             labelPopupDelay.Size = new Size(81, 17);
             labelPopupDelay.TabIndex = 7;
@@ -894,7 +1137,7 @@ namespace AutoTestClient
             // numericPopupDelay
             // 
             numericPopupDelay.Dock = DockStyle.Fill;
-            numericPopupDelay.Location = new Point(125, 113);
+            numericPopupDelay.Location = new Point(125, 127);
             numericPopupDelay.Margin = new Padding(5, 1, 5, 1);
             numericPopupDelay.Maximum = new decimal(new int[] { 60000, 0, 0, 0 });
             numericPopupDelay.Name = "numericPopupDelay";
@@ -908,7 +1151,7 @@ namespace AutoTestClient
             checkAutoConfirm.Checked = true;
             checkAutoConfirm.CheckState = CheckState.Checked;
             planOptions.SetColumnSpan(checkAutoConfirm, 2);
-            checkAutoConfirm.Location = new Point(13, 141);
+            checkAutoConfirm.Location = new Point(13, 151);
             checkAutoConfirm.Margin = new Padding(5, 1, 5, 1);
             checkAutoConfirm.Name = "checkAutoConfirm";
             checkAutoConfirm.Size = new Size(155, 21);
@@ -920,10 +1163,10 @@ namespace AutoTestClient
             // 
             planOptions.SetColumnSpan(buttonRecipeManager, 2);
             buttonRecipeManager.Dock = DockStyle.Fill;
-            buttonRecipeManager.Location = new Point(13, 173);
+            buttonRecipeManager.Location = new Point(13, 175);
             buttonRecipeManager.Margin = new Padding(5, 1, 5, 1);
             buttonRecipeManager.Name = "buttonRecipeManager";
-            buttonRecipeManager.Size = new Size(292, 32);
+            buttonRecipeManager.Size = new Size(292, 30);
             buttonRecipeManager.TabIndex = 10;
             buttonRecipeManager.Text = "编辑测试项目";
             buttonRecipeManager.UseVisualStyleBackColor = true;
@@ -960,8 +1203,13 @@ namespace AutoTestClient
             manualTable.PerformLayout();
             groupPlan.ResumeLayout(false);
             planTable.ResumeLayout(false);
+            crosstalkPreviewLayout.ResumeLayout(false);
+            crosstalkToolbar.ResumeLayout(false);
+            ((ISupportInitialize)numericCrosstalkThreshold).EndInit();
             planOptions.ResumeLayout(false);
             planOptions.PerformLayout();
+            planPresetToolbar.ResumeLayout(false);
+            planPresetToolbar.PerformLayout();
             ((ISupportInitialize)numericWholeRepeat).EndInit();
             ((ISupportInitialize)numericProjectRepeat).EndInit();
             ((ISupportInitialize)numericPopupDelay).EndInit();

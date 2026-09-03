@@ -390,7 +390,11 @@ internal static class SimpleXlsx
                 for (int column = 0; column < columnCount; column++)
                 {
                     object? value = sheet.Values[row, column];
-                    if (value is null || value is double number && double.IsNaN(number)) continue;
+                    // Excel numeric cells do not have a portable representation
+                    // for NaN or +/-Infinity.  Treat every non-finite double
+                    // as an empty cell, matching the analysis/export policy
+                    // used for masked and invalid samples elsewhere.
+                    if (value is null || value is double number && !double.IsFinite(number)) continue;
                     WriteCell(writer, row + 1, column + 1, value,
                         sheet.FirstRowIsHeader && row == 0);
                 }
